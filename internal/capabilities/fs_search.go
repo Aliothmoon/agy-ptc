@@ -16,10 +16,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
-	"github.com/alioth/agy-ptc/internal/policy"
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/policy"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 const (
@@ -368,6 +369,9 @@ func (b *FSSearchBinder) runTextOrRegexSearch(ctx context.Context, workspaceCwd,
 		if err == nil {
 			return hits, nil
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 	return runGoFallbackSearch(ctx, workspaceCwd, searchRoot, q)
 }
@@ -390,25 +394,31 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 	}
 	rgArgs = append(rgArgs, "--", q.pattern, searchRoot)
 
-	cmd := exec.CommandContext(ctx, rgBin, rgArgs...)
+	rgCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(rgCtx, rgBin, rgArgs...)
 	setSysProcAttrHide(cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newLimitedSyncBuffer(2 * 1024 * 1024)
+	stderr := newLimitedSyncBuffer(128 * 1024)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err := cmd.Run()
 	// rg exit code 1 means 0 matches; exit code 2 means regex/syntax error.
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(err, &exitErr) && rgCtx.Err() == nil {
 			if exitErr.ExitCode() == 1 {
 				return []SearchHit{}, nil
 			}
 			if exitErr.ExitCode() == 2 {
 				return nil, fmt.Errorf("invalid search pattern: %s", strings.TrimSpace(stderr.String()))
 			}
-		} else {
-			return nil, err
 		}
+		if rgCtx.Err() != nil {
+			return nil, fmt.Errorf("search.rg timed out: %w", rgCtx.Err())
+		}
+		return nil, err
 	}
 
 	type rgEvent struct {
@@ -431,7 +441,7 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 	}
 
 	hits := []SearchHit{}
-	scanner := bufio.NewScanner(&stdout)
+	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		var ev rgEvent

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alioth/agy-ptc/internal/audit"
-	"github.com/alioth/agy-ptc/internal/output"
+	"github.com/aliothmoon/agy-ptc/internal/audit"
+	"github.com/aliothmoon/agy-ptc/internal/output"
 )
 
 func TestEngineEndToEndSearchASTEditTxRollbackAndCommit(t *testing.T) {
@@ -375,6 +375,58 @@ func TestExternalNonWorkspacePathsSupportedAcrossAllCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(out, `"hasUpdated": true`) || !strings.Contains(out, `"sym": "Hello"`) {
 		t.Fatalf("unexpected external path output: %s", out)
+	}
+}
+
+func TestSubprocessTreeTimeoutDoesNotHangAndTxAutoRollsBack(t *testing.T) {
+	ws := t.TempDir()
+	orig := "package sample\nconst Version = 1\n"
+	sampleFile := filepath.Join(ws, "version.go")
+	_ = os.WriteFile(sampleFile, []byte(orig), 0o644)
+
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	// 1. Per-command timeoutMs inside sh.exec must kill child + grandchild holding stdout pipe open and return quickly without hanging!
+	outSh, isErrSh := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:       ws,
+		TimeoutMs: 5000,
+		Code: `
+			const r = await sh.exec("node -e \"console.log('started-child'); setInterval(() => {}, 1000)\"", { timeoutMs: 500 });
+			return { ok: r.ok, timedOut: r.timedOut, hasPartial: r.output.includes("started-child") || r.output.includes("TIMED OUT") };
+		`,
+	})
+	if isErrSh {
+		t.Fatalf("expected settled sh.exec timeout result, got error: %s", outSh)
+	}
+	if !strings.Contains(outSh, `"ok": false`) || !strings.Contains(outSh, `"timedOut": true`) || !strings.Contains(outSh, `"hasPartial": true`) {
+		t.Fatalf("unexpected sh.exec timeout envelope: %s", outSh)
+	}
+
+	// 2. Outer ptc_exec TimeoutMs (650ms) during an active tx.verify with a hung child tree must:
+	//    a) terminate the child tree without hanging cmd.Run()
+	//    b) roll back uncommitted tx edits cleanly after child exit
+	//    c) include culprit op + recovery hint in [ptc timeout error]
+	outOuter, isErrOuter := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:       ws,
+		TimeoutMs: 650,
+		Code: `
+			const t = await tx.begin();
+			await t.write("version.go", "package sample\nconst Version = 999 // uncommitted\n");
+			await t.verify(["node -e \"console.log('hung-verify-step'); setInterval(() => {}, 1000)\""], { timeoutSec: 30 });
+			await t.commit();
+			return { committed: true };
+		`,
+	})
+	if !isErrOuter {
+		t.Fatalf("expected outer ptc_exec timeout error, got success: %s", outOuter)
+	}
+	if !strings.Contains(outOuter, "[ptc timeout error") || !strings.Contains(outOuter, "run_command") {
+		t.Fatalf("expected structured timeout envelope with run_command hint, got: %s", outOuter)
+	}
+	restored, _ := os.ReadFile(sampleFile)
+	if string(restored) != orig {
+		t.Fatalf("expected uncommitted tx edit to roll back after timeout, got: %q", string(restored))
 	}
 }
 

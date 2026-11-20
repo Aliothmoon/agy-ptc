@@ -8,7 +8,7 @@
         "--data-dir",
         "${PLUGIN_DATA}"
       ],
-      "timeoutSeconds": 300,
+      "timeoutSeconds": 135,
       "tools": {
         "exec": {
           "eager": true

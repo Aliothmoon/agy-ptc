@@ -1,3 +1,5 @@
+// Package output provides UTF-8-safe byte budgeting, ANSI/CR terminal normalization,
+// and root-cause command output compaction under Antigravity CLI's inline spill threshold.
 package output
 
 import (

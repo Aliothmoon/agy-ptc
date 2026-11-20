@@ -1,3 +1,5 @@
+// Package runtime coordinates workspace capability bindings, sandbox execution,
+// inline-safe response budgeting, live TUI status updates, and audit logging.
 package runtime
 
 import (
@@ -12,11 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/audit"
-	"github.com/alioth/agy-ptc/internal/capabilities"
-	"github.com/alioth/agy-ptc/internal/output"
-	"github.com/alioth/agy-ptc/internal/policy"
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/audit"
+	"github.com/aliothmoon/agy-ptc/internal/capabilities"
+	"github.com/aliothmoon/agy-ptc/internal/output"
+	"github.com/aliothmoon/agy-ptc/internal/policy"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 // LiveStatus is written atomically to `${PLUGIN_DATA}/live-status.json` for `agy-ptc statusline`.
@@ -77,11 +79,12 @@ func (e *Engine) Close() {
 
 // ExecInput represents the flat MCP arguments passed to `exec`.
 type ExecInput struct {
-	Code      string            `json:"code"`
-	Payloads  map[string]string `json:"payloads,omitempty"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Title     string            `json:"title,omitempty"`
-	TimeoutMs int               `json:"timeoutMs,omitempty"`
+	Code       string            `json:"code"`
+	Payloads   map[string]string `json:"payloads,omitempty"`
+	Cwd        string            `json:"cwd,omitempty"`
+	Title      string            `json:"title,omitempty"`
+	TimeoutMs  int               `json:"timeoutMs,omitempty"`
+	TimeoutSec int               `json:"timeoutSec,omitempty"`
 }
 
 // SetClientWorkspace records a workspace root reported by the MCP client during `initialize`.
@@ -124,9 +127,11 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 		title = "ptc_exec"
 	}
 
-	timeout := sandbox.DefaultTimeout
+	timeout := sandbox.EffectiveDefaultTimeout()
 	if in.TimeoutMs > 0 {
 		timeout = time.Duration(in.TimeoutMs) * time.Millisecond
+	} else if in.TimeoutSec > 0 {
+		timeout = time.Duration(in.TimeoutSec) * time.Second
 	}
 
 	e.writeLiveStatus(LiveStatus{
@@ -424,7 +429,28 @@ func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateSto
 func formatErrorEnvelope(ee *sandbox.ExecutionError) string {
 	header := fmt.Sprintf("[ptc %s error | %d ops run | %dms]\n%s", ee.Phase, len(ee.Traces), ee.DurationMs, ee.Message)
 	var sections []string
-	sections = append(sections, output.TruncateWithByteNotice(header, 5200))
+	sections = append(sections, output.TruncateWithByteNotice(header, 4800))
+
+	if ee.Phase == "timeout" {
+		var culprits []string
+		for _, op := range ee.TimedOutOps {
+			culprits = append(culprits, "  - "+op)
+		}
+		for _, t := range ee.Traces {
+			if t.Status == "error" && (strings.Contains(strings.ToUpper(t.Error), "TIMED OUT") || strings.Contains(strings.ToLower(t.Error), "deadline") || strings.Contains(strings.ToLower(t.Error), "canceled")) {
+				item := fmt.Sprintf("#%d %s", t.Seq, t.Capability)
+				if t.Target != "" {
+					item += "(" + t.Target + ")"
+				}
+				errPreview := output.TruncateWithByteNotice(t.Error, 900)
+				culprits = append(culprits, fmt.Sprintf("  - %s [%dms]: %s", item, t.DurationMs, errPreview))
+			}
+		}
+		if len(culprits) > 0 {
+			sections = append(sections, "Interrupted / timed-out operations (child process trees terminated):\n"+strings.Join(culprits, "\n"))
+		}
+		sections = append(sections, "Timeout recovery hint:\n  Keep ptc_exec fast (<15s). Pass a larger `timeoutMs` (up to 120000) for moderate checks, or use built-in `run_command` (`WaitMsBeforeAsync: 500..2000` / `IsDaemon: true`) + `manage_task` for >15s builds, full test suites, and dev servers.")
+	}
 
 	// Like pi-fabric: list completed host calls before failure so the model doesn't blindly repeat non-idempotent side effects!
 	if len(ee.Traces) > 0 {

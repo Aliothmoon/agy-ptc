@@ -1,3 +1,5 @@
+// Command agy-ptc provides the Programmatic Tool Calling (Code Mode) MCP server,
+// SessionStart hook, TUI statusline, audit log viewer, and plugin installer for Antigravity CLI.
 package main
 
 import (
@@ -17,11 +19,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/audit"
-	"github.com/alioth/agy-ptc/internal/bench"
-	"github.com/alioth/agy-ptc/internal/mcpserver"
-	ptcruntime "github.com/alioth/agy-ptc/internal/runtime"
-	"github.com/alioth/agy-ptc/internal/snapshot"
+	"github.com/aliothmoon/agy-ptc/internal/audit"
+	"github.com/aliothmoon/agy-ptc/internal/bench"
+	"github.com/aliothmoon/agy-ptc/internal/mcpserver"
+	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
+	"github.com/aliothmoon/agy-ptc/internal/snapshot"
 )
 
 const pluginName = "agy-ptc"
@@ -141,7 +143,7 @@ func runStandalone(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cwd := fs.String("cwd", "", "Workspace directory")
 	codeFlag := fs.String("code", "", "Inline TypeScript code to execute")
-	timeoutMs := fs.Int("timeout", 60000, "Timeout in milliseconds")
+	timeoutMs := fs.Int("timeout", 20000, "Timeout in milliseconds (default 20000, max 120000)")
 	_ = fs.Parse(args)
 
 	code := *codeFlag
@@ -630,7 +632,7 @@ func locateSourcePluginDir(exePath string) string {
 	exeDir := filepath.Dir(exePath)
 	candidates := []string{
 		filepath.Join(exeDir, "plugin"),
-		filepath.Join(exeDir, ".."),       // when binary is inside <plugin>/scripts/agy-ptc
+		filepath.Join(exeDir, ".."), // when binary is inside <plugin>/scripts/agy-ptc
 		filepath.Join(exeDir, "..", "plugin"),
 	}
 	if cwd, err := os.Getwd(); err == nil {

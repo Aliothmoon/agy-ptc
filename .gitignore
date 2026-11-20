@@ -1,6 +1,21 @@
+# Compiled binaries
 /agy-ptc
 /agy-ptc.exe
 /plugin/scripts/agy-ptc
 /plugin/scripts/agy-ptc.exe
+*.exe
+*.old
+/bin/
 /dist/
+
+# Go test & coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Scratch & editor directories
 /.tmp/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

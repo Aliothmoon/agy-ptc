@@ -1,3 +1,4 @@
+// Package bench analyzes Antigravity CLI session transcripts to measure turn and spill efficiency.
 package bench
 
 import (

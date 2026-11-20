@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	ptcruntime "github.com/alioth/agy-ptc/internal/runtime"
+	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
 )
 
 func TestMCPServerNDJSONAndContentLengthFraming(t *testing.T) {

@@ -1,3 +1,5 @@
+// Package snapshot implements the fast SessionStart workspace context hook
+// and the live statusline renderer for Antigravity CLI.
 package snapshot
 
 import (
@@ -13,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/output"
-	ptcruntime "github.com/alioth/agy-ptc/internal/runtime"
+	"github.com/aliothmoon/agy-ptc/internal/output"
+	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
 )
 
 var noisyDirs = map[string]bool{
@@ -36,16 +38,16 @@ var noisyDirs = map[string]bool{
 }
 
 var priorityDirNames = map[string]int{
-	"cmd":        1,
-	"internal":   2,
-	"pkg":        3,
-	"src":        4,
-	"app":        5,
-	"packages":   6,
-	"plugin":     7,
-	"scripts":    8,
-	"test":       9,
-	"tests":      10,
+	"cmd":      1,
+	"internal": 2,
+	"pkg":      3,
+	"src":      4,
+	"app":      5,
+	"packages": 6,
+	"plugin":   7,
+	"scripts":  8,
+	"test":     9,
+	"tests":    10,
 }
 
 type sessionStartInput struct {

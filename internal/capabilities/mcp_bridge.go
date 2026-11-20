@@ -19,8 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/policy"
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/policy"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 // ToolDescriptor represents a discoverable builtin or MCP action inside `tools.*`.
@@ -54,10 +54,10 @@ type MCPBridge struct {
 	WorkspaceDir string
 	SelfName     string // e.g. "agy-ptc" or "agy-ptc_ptc", excluded to prevent recursion
 
-	mu          sync.Mutex
-	stdioPool   map[string]*stdioClient
-	httpClient  *http.Client
-	reqSeq      atomic.Int64
+	mu         sync.Mutex
+	stdioPool  map[string]*stdioClient
+	httpClient *http.Client
+	reqSeq     atomic.Int64
 }
 
 // NewMCPBridge constructs an external MCP multiplexer.
@@ -205,17 +205,20 @@ func (m *MCPBridge) CallExternalTool(ctx context.Context, cwd, rawRef string, ca
 		return nil, err
 	}
 
+	callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+
 	endpoint := strings.TrimSpace(cfg.ServerURL)
 	if endpoint == "" {
 		endpoint = strings.TrimSpace(cfg.URL)
 	}
 	if endpoint != "" {
-		return m.callStreamableHTTP(ctx, serverName, endpoint, cfg.Headers, exactTool, callArgs)
+		return m.callStreamableHTTP(callCtx, serverName, endpoint, cfg.Headers, exactTool, callArgs)
 	}
 	if cfg.Command == "" {
 		return nil, fmt.Errorf("MCP server '%s' has neither 'command' nor 'serverUrl'", serverName)
 	}
-	return m.callStdioServer(ctx, serverName, cfg, exactTool, callArgs)
+	return m.callStdioServer(callCtx, serverName, cfg, exactTool, callArgs)
 }
 
 func (m *MCPBridge) buildCatalog(cwd string, includeSchemas bool) []ToolDescriptor {
@@ -473,13 +476,13 @@ func (m *MCPBridge) callStdioServer(ctx context.Context, serverName string, cfg 
 }
 
 type stdioClient struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	mu      sync.Mutex
-	pending map[int64]chan []byte
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	mu        sync.Mutex
+	pending   map[int64]chan []byte
 	pendingMu sync.Mutex
-	seq     atomic.Int64
-	closed  atomic.Bool
+	seq       atomic.Int64
+	closed    atomic.Bool
 }
 
 func startStdioClient(cfg externalServerCfg) (*stdioClient, error) {
@@ -628,9 +631,7 @@ func (c *stdioClient) callTool(ctx context.Context, serverName, toolName string,
 func (c *stdioClient) close() {
 	c.closed.Store(true)
 	_ = c.stdin.Close()
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-	}
+	killCmdProcessTree(c.cmd)
 }
 
 func decodeMCPCallResponse(serverName, toolName string, raw []byte) (any, error) {

@@ -1,3 +1,5 @@
+// Package policy enforces path resolution, symlink guards, sensitive file protection,
+// and Antigravity CLI settings.json permission rules.
 package policy
 
 import (

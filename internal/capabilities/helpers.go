@@ -1,3 +1,5 @@
+// Package capabilities implements policy-checked sandbox host bindings for filesystem,
+// search, AST outlining, atomic transactions, git, shell checks, session state, and external MCP servers.
 package capabilities
 
 import (

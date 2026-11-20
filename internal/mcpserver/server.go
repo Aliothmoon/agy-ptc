@@ -1,3 +1,5 @@
+// Package mcpserver implements a JSON-RPC 2.0 MCP stdio server supporting both
+// newline-delimited JSON (NDJSON) and Content-Length header framing.
 package mcpserver
 
 import (
@@ -12,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	ptcruntime "github.com/alioth/agy-ptc/internal/runtime"
+	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
 )
 
 const (
@@ -322,7 +324,7 @@ func (s *Server) handleSingle(ctx context.Context, req jsonRPCRequest) *jsonRPCR
 
 func execToolDefinition() map[string]any {
 	return map[string]any{
-		"name": "exec",
+		"name":        "exec",
 		"description": "Execute a TypeScript program in an isolated Programmatic Tool Calling (PTC) sandbox to compose search, AST outline, file reads, multi-file atomic edits, transactions (edit -> concurrent verify -> auto-rollback), read-only git, shell checks, session state, and external MCP calls in ONE turn. Intermediate data stays in sandbox memory; return a compact structured summary.",
 		"inputSchema": map[string]any{
 			"type": "object",
@@ -347,8 +349,8 @@ func execToolDefinition() map[string]any {
 				"timeoutMs": map[string]any{
 					"type":        "integer",
 					"minimum":     500,
-					"maximum":     300000,
-					"description": "Optional execution deadline in milliseconds (default 60000).",
+					"maximum":     120000,
+					"description": "Optional execution deadline in milliseconds (default 20000, max 120000). Subprocess trees are automatically killed on timeout. For >15s builds/tests or daemons, use built-in run_command + manage_task.",
 				},
 			},
 			"required": []string{"code", "cwd"},

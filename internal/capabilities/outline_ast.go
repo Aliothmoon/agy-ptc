@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/alioth/agy-ptc/internal/policy"
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/policy"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 // SymbolInfo describes a top-level or nested code symbol with 1-based inclusive line numbers.

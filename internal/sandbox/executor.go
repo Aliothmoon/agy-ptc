@@ -1,3 +1,5 @@
+// Package sandbox executes compiled TypeScript programs inside isolated goja JavaScript VMs
+// with concurrent host Promise bridging, operation budgets, and deadline enforcement.
 package sandbox
 
 import (
@@ -5,22 +7,49 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/compiler"
+	"github.com/aliothmoon/agy-ptc/internal/compiler"
 	"github.com/dop251/goja"
 )
 
 const (
-	DefaultTimeout = 60 * time.Second
-	MaxTimeout     = 300 * time.Second
+	DefaultTimeout = 20 * time.Second
+	MaxTimeout     = 120 * time.Second
 	DefaultMaxOps  = 400
 	MaxLogEntries  = 120
 	MaxLogBytes    = 8192
 )
+
+// EffectiveDefaultTimeout returns DefaultTimeout (20s) unless overridden via AGY_PTC_DEFAULT_TIMEOUT_MS.
+func EffectiveDefaultTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("AGY_PTC_DEFAULT_TIMEOUT_MS")); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms >= 500 {
+			d := time.Duration(ms) * time.Millisecond
+			if d > EffectiveMaxTimeout() {
+				return EffectiveMaxTimeout()
+			}
+			return d
+		}
+	}
+	return DefaultTimeout
+}
+
+// EffectiveMaxTimeout returns MaxTimeout (120s) unless overridden via AGY_PTC_MAX_TIMEOUT_MS.
+func EffectiveMaxTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("AGY_PTC_MAX_TIMEOUT_MS")); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms >= 1000 && ms <= 600000 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return MaxTimeout
+}
 
 // OpTrace records a single host capability call executed by a guest program.
 type OpTrace struct {
@@ -65,11 +94,12 @@ type ExecResult struct {
 
 // ExecutionError wraps compile or runtime failures along with partial logs and completed traces.
 type ExecutionError struct {
-	Phase      string // "compile" | "runtime" | "timeout"
-	Message    string
-	Logs       []string
-	Traces     []OpTrace
-	DurationMs int64
+	Phase       string // "compile" | "runtime" | "timeout"
+	Message     string
+	TimedOutOps []string
+	Logs        []string
+	Traces      []OpTrace
+	DurationMs  int64
 }
 
 func (e *ExecutionError) Error() string {
@@ -78,6 +108,13 @@ func (e *ExecutionError) Error() string {
 
 type loopAction struct {
 	run func()
+}
+
+type inFlightEntry struct {
+	seq        int
+	capability string
+	target     string
+	startedAt  time.Time
 }
 
 // ExecutionEnv represents one isolated VM run and provides safe host binding helpers.
@@ -93,6 +130,9 @@ type ExecutionEnv struct {
 	onOpStart  func(capability, target string, seq int)
 	tracesMu   sync.Mutex
 	traces     []OpTrace
+	inFlightMu sync.Mutex
+	inFlight   map[int]inFlightEntry
+	asyncWG    sync.WaitGroup
 	logsMu     sync.Mutex
 	logs       []string
 	logBytes   int
@@ -166,11 +206,15 @@ func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goj
 
 		promise, resolve, reject := env.VM.NewPromise()
 		env.pendingOps.Add(1)
+		env.asyncWG.Add(1)
 		start := time.Now()
+		env.trackInFlightStart(seq, capability, target, start)
 
 		go func() {
+			defer env.asyncWG.Done()
 			res, err := fn(env.Ctx, exported)
 			dur := time.Since(start).Milliseconds()
+			env.trackInFlightDone(seq)
 			if err != nil {
 				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "error", Error: err.Error()})
 			} else {
@@ -198,6 +242,58 @@ func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goj
 		}()
 
 		return env.VM.ToValue(promise)
+	}
+}
+
+func (env *ExecutionEnv) trackInFlightStart(seq int, capability, target string, startedAt time.Time) {
+	env.inFlightMu.Lock()
+	defer env.inFlightMu.Unlock()
+	if env.inFlight == nil {
+		env.inFlight = map[int]inFlightEntry{}
+	}
+	env.inFlight[seq] = inFlightEntry{seq: seq, capability: capability, target: target, startedAt: startedAt}
+}
+
+func (env *ExecutionEnv) trackInFlightDone(seq int) {
+	env.inFlightMu.Lock()
+	defer env.inFlightMu.Unlock()
+	delete(env.inFlight, seq)
+}
+
+func (env *ExecutionEnv) snapshotInFlight() []string {
+	env.inFlightMu.Lock()
+	defer env.inFlightMu.Unlock()
+	if len(env.inFlight) == 0 {
+		return nil
+	}
+	items := make([]inFlightEntry, 0, len(env.inFlight))
+	for _, v := range env.inFlight {
+		items = append(items, v)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].seq < items[j].seq })
+	now := time.Now()
+	out := make([]string, len(items))
+	for i, it := range items {
+		label := fmt.Sprintf("#%d %s", it.seq, it.capability)
+		if it.target != "" {
+			label += "(" + it.target + ")"
+		}
+		out[i] = fmt.Sprintf("%s [running %dms]", label, now.Sub(it.startedAt).Milliseconds())
+	}
+	return out
+}
+
+func (env *ExecutionEnv) waitAsyncDrain(maxWait time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		env.asyncWG.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(maxWait)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
 	}
 }
 
@@ -289,10 +385,11 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 
 	timeout := req.Timeout
 	if timeout <= 0 {
-		timeout = DefaultTimeout
+		timeout = EffectiveDefaultTimeout()
 	}
-	if timeout > MaxTimeout {
-		timeout = MaxTimeout
+	maxTimeout := EffectiveMaxTimeout()
+	if timeout > maxTimeout {
+		timeout = maxTimeout
 	}
 	maxOps := req.MaxOps
 	if maxOps <= 0 {
@@ -300,7 +397,6 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
-	defer cancel()
 
 	vm := goja.New()
 	vm.SetFieldNameMapper(goja.TagFieldNameMapper("json", true))
@@ -312,8 +408,15 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		loopCh:    make(chan loopAction, 256),
 		maxOps:    maxOps,
 		onOpStart: req.OnOpStart,
+		inFlight:  map[int]inFlightEntry{},
 	}
+	// Crucial teardown order on exit:
+	// 1) cancel() kills all child process trees via cmd.Cancel()
+	// 2) waitAsyncDrain(800ms) waits for subprocess handles to release
+	// 3) cleanupFns roll back uncommitted tx.* file snapshots safely without Windows file-lock contention!
 	defer func() {
+		cancel()
+		env.waitAsyncDrain(800 * time.Millisecond)
 		for i := len(env.cleanupFns) - 1; i >= 0; i-- {
 			env.cleanupFns[i]()
 		}
@@ -419,6 +522,7 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 
 	for promise.State() == goja.PromiseStatePending {
 		if env.pendingOps.Load() == 0 && len(env.loopCh) == 0 {
+			cancel()
 			return nil, &ExecutionError{
 				Phase:      "runtime",
 				Message:    "DeadlockError: top-level Promise remained pending with 0 active host operations (check for unresolved new Promise())",
@@ -431,12 +535,31 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		case act := <-env.loopCh:
 			act.run()
 		case <-ctx.Done():
+			snapInFlight := env.snapshotInFlight()
+			cancel()
+			env.waitAsyncDrain(800 * time.Millisecond)
+			stillStuck := env.snapshotInFlight()
+			culprits := stillStuck
+			if len(culprits) == 0 {
+				traces := env.getTraces()
+				recordedErr := false
+				for _, tr := range traces {
+					if tr.Status == "error" {
+						recordedErr = true
+						break
+					}
+				}
+				if !recordedErr {
+					culprits = snapInFlight
+				}
+			}
 			return nil, &ExecutionError{
-				Phase:      "timeout",
-				Message:    fmt.Sprintf("TimeoutError: program exceeded %s deadline", timeout),
-				Logs:       env.getLogs(),
-				Traces:     env.getTraces(),
-				DurationMs: time.Since(start).Milliseconds(),
+				Phase:       "timeout",
+				Message:     fmt.Sprintf("TimeoutError: program exceeded %s deadline (timeoutMs=%d; max=%d)", timeout, timeout.Milliseconds(), EffectiveMaxTimeout().Milliseconds()),
+				TimedOutOps: culprits,
+				Logs:        env.getLogs(),
+				Traces:      env.getTraces(),
+				DurationMs:  time.Since(start).Milliseconds(),
 			}
 		}
 	}
@@ -444,11 +567,22 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 	if promise.State() == goja.PromiseStateRejected {
 		rej := promise.Result()
 		msg := formatRejectedValue(vm, rej)
+		cancel()
+		env.waitAsyncDrain(800 * time.Millisecond)
+		traces := env.getTraces()
+		if msg == "" || msg == "[object Object]" || msg == "{}" {
+			for i := len(traces) - 1; i >= 0; i-- {
+				if traces[i].Status == "error" && traces[i].Error != "" {
+					msg = fmt.Sprintf("%s: %s", traces[i].Capability, traces[i].Error)
+					break
+				}
+			}
+		}
 		return nil, &ExecutionError{
 			Phase:      "runtime",
 			Message:    compiler.FormatRuntimeError(msg, cr),
 			Logs:       env.getLogs(),
-			Traces:     env.getTraces(),
+			Traces:     traces,
 			DurationMs: time.Since(start).Milliseconds(),
 		}
 	}
@@ -472,11 +606,12 @@ func (env *ExecutionEnv) wrapRuntimeErr(err error, cr *compiler.CompileResult, s
 		phase = "timeout"
 	}
 	return &ExecutionError{
-		Phase:      phase,
-		Message:    compiler.FormatRuntimeError(err.Error(), cr),
-		Logs:       env.getLogs(),
-		Traces:     env.getTraces(),
-		DurationMs: time.Since(start).Milliseconds(),
+		Phase:       phase,
+		Message:     compiler.FormatRuntimeError(err.Error(), cr),
+		TimedOutOps: env.snapshotInFlight(),
+		Logs:        env.getLogs(),
+		Traces:      env.getTraces(),
+		DurationMs:  time.Since(start).Milliseconds(),
 	}
 }
 

@@ -1,3 +1,4 @@
+// Package audit records structured execution and error telemetry for PTC runs.
 package audit
 
 import (
@@ -13,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 const maxLogFileBytes = 10 * 1024 * 1024 // 10 MB per JSONL file before rotation

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 const (

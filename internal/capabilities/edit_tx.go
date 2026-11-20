@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/alioth/agy-ptc/internal/policy"
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/policy"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 // EditHunk represents a single non-overlapping replacement inside a file.
@@ -31,13 +31,13 @@ type FileEditSpec struct {
 }
 
 type plannedFileWrite struct {
-	absPath     string
-	relPath     string
-	existed     bool
-	origBytes   []byte
-	newBytes    []byte
+	absPath      string
+	relPath      string
+	existed      bool
+	origBytes    []byte
+	newBytes     []byte
 	hunksApplied int
-	lineDelta   int
+	lineDelta    int
 }
 
 type fileSnapshot struct {

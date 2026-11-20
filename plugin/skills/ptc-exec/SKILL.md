@@ -19,7 +19,9 @@ description: >-
 - `code` is compiled with `esbuild` (`TypeScript -> ES2020`) before any host operation runs. Syntax errors or missing `P.<key>` references fail preflight with **0 side effects** and exact 1-based line numbers.
 - Top-level `await` and `return` work directly. Do **not** wrap `code` in `async function main() {}`.
 - `import type { ... } from "..."` is stripped safely; runtime `import`/`require` are disabled for sandbox isolation. Use host capabilities (`fs`, `search`, `ast`, `edit`, `tx`, `git`, `sh`, `state`, `tools`, `mcp`).
-- Read-only `git.*` probes and `sh.exec` (`settle: true` by default) return structured `{ ok: false, ... }` / diagnostic strings instead of crashing `Promise.all`.
+- Read-only `git.*` probes and `sh.exec` (`settle: true`, `15s` default timeout) return structured `{ ok: false, timedOut, ... }` / diagnostic strings instead of crashing `Promise.all`.
+- **Timeouts & Process-Tree Protection**: `mcp_agy-ptc_ptc_exec` enforces a **`20s` default deadline** (`timeoutMs: 20000`, configurable `500..120000`) and automatically terminates entire child process trees + closes inherited pipes on timeout so runaway commands never hang.
+- **Fast Checks vs. Long Background Tasks**: Run `<15s` checks (`go vet`, `tsc --noEmit`, lint, package-scoped unit tests) inside `sh.checks` / `tx.verify`. For `>15s` full test suites, heavy builds, or `IsDaemon: true` servers, hand off to native `run_command(WaitMsBeforeAsync: 500..2000)` + `manage_task` so `/tasks` streams live logs and wakes the session automatically.
 
 ## 2. Transactional Refactoring (`tx`)
 

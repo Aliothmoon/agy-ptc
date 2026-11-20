@@ -3,7 +3,7 @@
   "name": "agy-ptc",
   "displayName": "PTC Code Mode",
   "version": "0.1.0",
-  "description": "Programmatic Tool Calling (Code Mode) runtime for Antigravity CLI: compose search, AST outlines, edits, atomic rollback transactions, and MCP calls in one TypeScript turn.",
+  "description": "Programmatic Tool Calling (Code Mode) runtime for Antigravity CLI: compose search, AST outlines, multi-file transactional edits with auto-rollback, fast checks, and external MCP calls in one TypeScript turn.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Audit all Go handlers in this repo, outline missing error checks, and summarize findings in one PTC run",
@@ -11,19 +11,20 @@
     "Search across the codebase, correlate symbol definitions, and run build + test checks concurrently"
   ],
   "author": {
-    "name": "Alioth",
-    "url": "https://github.com/alioth/agy-ptc"
+    "name": "Aliothmoon",
+    "url": "https://github.com/aliothmoon/agy-ptc"
   },
-  "homepage": "https://github.com/alioth/agy-ptc",
-  "repository": "https://github.com/alioth/agy-ptc",
+  "homepage": "https://github.com/aliothmoon/agy-ptc",
+  "repository": "https://github.com/aliothmoon/agy-ptc",
   "license": "MIT",
   "keywords": [
+    "antigravity",
     "ptc",
     "code-mode",
-    "orchestration",
+    "mcp",
+    "ast",
     "sandbox",
     "typescript",
-    "latency",
     "transactions"
   ]
 }

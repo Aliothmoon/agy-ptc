@@ -1,4 +1,4 @@
-module github.com/alioth/agy-ptc
+module github.com/aliothmoon/agy-ptc
 
 go 1.27.1
 

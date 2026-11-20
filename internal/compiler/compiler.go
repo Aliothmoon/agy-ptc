@@ -1,3 +1,5 @@
+// Package compiler transpiles TypeScript async function bodies into ES2020 JavaScript
+// with VLQ source-mapped diagnostics and static payload key validation.
 package compiler
 
 import (

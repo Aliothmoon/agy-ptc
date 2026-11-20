@@ -1,7 +1,6 @@
 package capabilities
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alioth/agy-ptc/internal/output"
-	"github.com/alioth/agy-ptc/internal/policy"
-	"github.com/alioth/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/output"
+	"github.com/aliothmoon/agy-ptc/internal/policy"
+	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 var allowedGitReadSubcommands = map[string]bool{
@@ -53,7 +52,7 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 				}
 				workDir = resolved
 			}
-			timeoutSec := optInt(opts, "timeoutSec", optInt(opts, "timeout", 60))
+			cmdTimeout := resolveCommandTimeout(opts, DefaultShellTimeout)
 			// Default settle=true (pi-fabric native style): non-zero exit codes return `{ ok: false, exitCode, output }`
 			// instead of blowing up Promise.all! Callers wanting exceptions can pass `{ throwOnError: true }` or `{ settle: false }`.
 			settle := optBool(opts, "settle", true)
@@ -61,7 +60,7 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 				settle = false
 			}
 			compact := optBool(opts, "compact", false)
-			res, err := b.RunSingleCommand(ctx, workDir, cmdStr, timeoutSec, settle, compact)
+			res, err := b.RunSingleCommandDuration(ctx, workDir, cmdStr, cmdTimeout, settle, compact)
 			if err != nil {
 				return nil, err
 			}
@@ -171,18 +170,60 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 	return env.SetNamespace("git", gitAsync, nil)
 }
 
-// RunSingleCommand executes one shell command after validating policy rules.
+const (
+	DefaultShellTimeout = 15 * time.Second
+	MaxShellTimeout     = 120 * time.Second
+)
+
+func resolveCommandTimeout(opts map[string]any, fallback time.Duration) time.Duration {
+	if opts == nil {
+		return fallback
+	}
+	var dur time.Duration
+	if ms := optInt(opts, "timeoutMs", 0); ms > 0 {
+		dur = time.Duration(ms) * time.Millisecond
+	} else if sec := optInt(opts, "timeoutSec", 0); sec > 0 {
+		dur = time.Duration(sec) * time.Second
+	} else if raw := optInt(opts, "timeout", 0); raw > 0 {
+		// Node.js child_process convention passes milliseconds (e.g. 5000); values < 500 are seconds.
+		if raw >= 500 {
+			dur = time.Duration(raw) * time.Millisecond
+		} else {
+			dur = time.Duration(raw) * time.Second
+		}
+	} else {
+		dur = fallback
+	}
+	if dur < 100*time.Millisecond {
+		dur = 100 * time.Millisecond
+	}
+	if dur > MaxShellTimeout {
+		dur = MaxShellTimeout
+	}
+	return dur
+}
+
+// RunSingleCommand executes one shell command with a timeout in seconds (compatibility wrapper).
 func (b *ShellGitBinder) RunSingleCommand(parentCtx context.Context, cwd, cmdLine string, timeoutSec int, settle, compact bool) (map[string]any, error) {
+	dur := DefaultShellTimeout
+	if timeoutSec > 0 {
+		dur = time.Duration(timeoutSec) * time.Second
+	}
+	return b.RunSingleCommandDuration(parentCtx, cwd, cmdLine, dur, settle, compact)
+}
+
+// RunSingleCommandDuration executes one shell command after validating policy rules, killing the entire child process tree on timeout.
+func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd, cmdLine string, timeoutDur time.Duration, settle, compact bool) (map[string]any, error) {
 	if err := b.Policy.CheckCommand(cmdLine); err != nil {
 		return nil, err
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = 60
+	if timeoutDur <= 0 {
+		timeoutDur = DefaultShellTimeout
 	}
-	if timeoutSec > 300 {
-		timeoutSec = 300
+	if timeoutDur > MaxShellTimeout {
+		timeoutDur = MaxShellTimeout
 	}
-	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(timeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, timeoutDur)
 	defer cancel()
 
 	start := time.Now()
@@ -199,22 +240,24 @@ func (b *ShellGitBinder) RunSingleCommand(parentCtx context.Context, cwd, cmdLin
 	cmd.Dir = cwd
 	setSysProcAttrHide(cmd)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newLimitedSyncBuffer(512 * 1024)
+	stderr := newLimitedSyncBuffer(256 * 1024)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
 	durMs := time.Since(start).Milliseconds()
-	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) && parentCtx.Err() == nil
+	parentCanceled := parentCtx.Err() != nil
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(runErr, exec.ErrWaitDelay) || parentCanceled
 	exitCode := 0
 	spawnErr := ""
 
 	if runErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else if timedOut {
+		if timedOut {
 			exitCode = -1
+		} else if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = -1
 			spawnErr = runErr.Error()
@@ -230,6 +273,15 @@ func (b *ShellGitBinder) RunSingleCommand(parentCtx context.Context, cwd, cmdLin
 		MaxBytes: 6000,
 		Compact:  compact,
 	})
+	if timedOut {
+		formatted = fmt.Sprintf("TIMED OUT after %dms (process tree terminated; for >15s long tasks use built-in run_command + manage_task)\n%s", durMs, strings.TrimPrefix(strings.TrimPrefix(formatted, "TIMED OUT\n"), "TIMED OUT (no output)"))
+		formatted = strings.TrimSpace(formatted)
+	}
+
+	// If the outer ptc_exec deadline fired, return an error so the sandbox trace captures the partial stdout/stderr for [ptc timeout error]!
+	if parentCanceled {
+		return nil, fmt.Errorf("%s", formatted)
+	}
 
 	ok := exitCode == 0 && !timedOut && spawnErr == ""
 	envelope := map[string]any{
@@ -247,10 +299,10 @@ func (b *ShellGitBinder) RunSingleCommand(parentCtx context.Context, cwd, cmdLin
 }
 
 type checkSpec struct {
-	name       string
-	command    string
-	cwd        string
-	timeoutSec int
+	name    string
+	command string
+	cwd     string
+	timeout time.Duration
 }
 
 // RunChecksBatch runs multiple build/lint/test commands concurrently and returns a unified pass/fail envelope.
@@ -260,7 +312,7 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 	}
 	var specs []checkSpec
 	concurrency := 4
-	defaultTimeout := 60
+	defaultTimeout := DefaultShellTimeout
 	compact := true
 
 	var rawList []any
@@ -276,7 +328,7 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 	}
 	if opts != nil {
 		concurrency = optInt(opts, "concurrency", 4)
-		defaultTimeout = optInt(opts, "timeoutSec", 60)
+		defaultTimeout = resolveCommandTimeout(opts, DefaultShellTimeout)
 		if mode := firstString(opts, "outputMode"); mode == "full" {
 			compact = false
 		} else {
@@ -300,10 +352,10 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 		switch v := item.(type) {
 		case string:
 			specs = append(specs, checkSpec{
-				name:       fmt.Sprintf("cmd_%d", i+1),
-				command:    v,
-				cwd:        baseCwd,
-				timeoutSec: defaultTimeout,
+				name:    fmt.Sprintf("cmd_%d", i+1),
+				command: v,
+				cwd:     baseCwd,
+				timeout: defaultTimeout,
 			})
 		case map[string]any:
 			cmdStr := firstString(v, "command", "cmd")
@@ -326,10 +378,10 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 				}
 			}
 			specs = append(specs, checkSpec{
-				name:       nm,
-				command:    cmdStr,
-				cwd:        subDir,
-				timeoutSec: optInt(v, "timeoutSec", defaultTimeout),
+				name:    nm,
+				command: cmdStr,
+				cwd:     subDir,
+				timeout: resolveCommandTimeout(v, defaultTimeout),
 			})
 		default:
 			return nil, fmt.Errorf("check #%d must be a string or object", i+1)
@@ -353,7 +405,7 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			r, err := b.RunSingleCommand(ctx, s.cwd, s.command, s.timeoutSec, true, compact)
+			r, err := b.RunSingleCommandDuration(ctx, s.cwd, s.command, s.timeout, true, compact)
 			if err != nil {
 				results[i] = map[string]any{
 					"name":     s.name,
@@ -451,10 +503,14 @@ func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, 
 	cmd := exec.CommandContext(cctx, "git", fullArgs...)
 	cmd.Dir = cwd
 	setSysProcAttrHide(cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newLimitedSyncBuffer(256 * 1024)
+	stderr := newLimitedSyncBuffer(64 * 1024)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
+		if cctx.Err() != nil {
+			return "", fmt.Errorf("git %s timed out: %w", sub, cctx.Err())
+		}
 		return "", fmt.Errorf("git %s failed: %s", sub, strings.TrimSpace(stderr.String()))
 	}
 	return output.TruncateHeadTailBytes(strings.TrimRight(stdout.String(), "\r\n"), 64*1024, ""), nil
