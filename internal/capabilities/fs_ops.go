@@ -3,7 +3,9 @@ package capabilities
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -39,6 +41,10 @@ func applyEOL(path string, orig []byte, existed bool, next []byte, eol string) (
 // They act immediately (not transactional); use t.write / t.rm inside a tx for rollback-able changes.
 func (b *FSSearchBinder) fileOps(env *sandbox.ExecutionEnv) map[string]sandbox.AsyncHostFunc {
 	return map[string]sandbox.AsyncHostFunc{
+		// raw fs._bytes; the bootstrap exposes fs.bytes(path, opts) returning a Buffer.
+		"_bytes": func(_ context.Context, args []any) (any, error) {
+			return b.readBytes(env.Cwd, args)
+		},
 		// fs.mkdir(path): creates parents too (like mkdir -p); no error if it exists.
 		"mkdir": func(_ context.Context, args []any) (any, error) {
 			p, err := requireStringArg(args, 0, "path")
@@ -193,4 +199,132 @@ func optsAt(args []any, i int) map[string]any {
 		}
 	}
 	return nil
+}
+
+// readTailLines returns the last n lines by reading backwards in blocks (no full scan; fine for huge logs).
+func readTailLines(absPath, display string, n int, withNumbers bool) (string, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	const block = 64 * 1024
+	pos := info.Size()
+	var buf []byte
+	for pos > 0 && len(buf) < MaxSandboxReadBytes {
+		size := int64(block)
+		if pos < size {
+			size = pos
+		}
+		pos -= size
+		chunk := make([]byte, size)
+		if _, err := f.ReadAt(chunk, pos); err != nil && err != io.EOF {
+			return "", err
+		}
+		buf = append(chunk, buf...)
+		if bytes.Count(bytes.TrimRight(buf, "\r\n"), []byte("\n")) >= n {
+			break
+		}
+	}
+	if bytes.IndexByte(buf, 0) >= 0 {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is binary", display)
+	}
+	text := strings.TrimRight(strings.ReplaceAll(string(buf), "\r\n", "\n"), "\n")
+	lines := strings.Split(text, "\n")
+	if pos > 0 && len(lines) > 0 {
+		lines = lines[1:] // first line may be partial
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for i := range lines {
+		lines[i] = strings.ToValidUTF8(lines[i], "\uFFFD")
+	}
+	if withNumbers {
+		total, err := countLines(f)
+		if err != nil {
+			return "", err
+		}
+		first := total - len(lines) + 1
+		for i := range lines {
+			lines[i] = fmt.Sprintf("%d: %s", first+i, lines[i])
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// countLines counts lines in f (a final line without a trailing newline counts too).
+func countLines(f *os.File) (int, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	buf := make([]byte, 256*1024)
+	count, last := 0, byte('\n')
+	for {
+		k, err := f.Read(buf)
+		if k > 0 {
+			count += bytes.Count(buf[:k], []byte("\n"))
+			last = buf[k-1]
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	if last != '\n' {
+		count++
+	}
+	return count, nil
+}
+
+// readBytes implements fs.bytes(path, { offset?, length? }) -> base64 (wrapped into a Buffer in the bootstrap).
+// A negative offset counts from the end of the file; length defaults to the rest, capped at 2MB.
+func (b *FSSearchBinder) readBytes(cwd string, args []any) (any, error) {
+	p, err := requireStringArg(args, 0, "path")
+	if err != nil {
+		return nil, err
+	}
+	opts := optsAt(args, 1)
+	abs, err := b.Policy.ResolveAndCheckRead(cwd, p)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is a directory", p)
+	}
+	size := info.Size()
+	off := int64(optInt(opts, "offset", 0))
+	if off < 0 {
+		off = max(0, size+off)
+	}
+	if off > size {
+		off = size
+	}
+	length := int64(optInt(opts, "length", optInt(opts, "maxBytes", 0)))
+	if length <= 0 || off+length > size {
+		length = size - off
+	}
+	if length > MaxSandboxReadBytes {
+		return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s: %d bytes requested (>2MB); pass { offset, length }", p, length)
+	}
+	data := make([]byte, length)
+	if _, err := f.ReadAt(data, off); err != nil && err != io.EOF {
+		return nil, err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
 }

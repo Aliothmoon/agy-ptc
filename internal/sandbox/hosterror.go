@@ -185,12 +185,16 @@ func levenshtein(a, b string) int {
 }
 
 // PublicOpName hides internal raw methods: `tx._begin` -> `tx.begin`, `tx._edit` -> `t.edit` (the handle the user holds).
+// Other raw `ns._m` helpers wrapped by the bootstrap (e.g. fs._bytes) surface as `ns.m`.
 func PublicOpName(capability string) string {
 	if m, ok := strings.CutPrefix(capability, "tx._"); ok {
 		if m == "begin" {
 			return "tx.begin"
 		}
 		return "t." + m
+	}
+	if ns, m, ok := strings.Cut(capability, "._"); ok {
+		return ns + "." + m
 	}
 	return capability
 }

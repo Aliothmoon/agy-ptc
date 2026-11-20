@@ -268,8 +268,12 @@ func extractGenericSymbols(ext string, lines []string) []SymbolInfo {
 		return extractMarkdownSections(lines)
 	case ".rs":
 		return extractBraceSymbols(lines, rustSymRegex)
-	case ".java", ".kt", ".cs":
+	case ".java", ".cs":
 		return extractBraceSymbols(lines, javaSymRegex)
+	case ".kt", ".kts":
+		return extractBraceSymbols(lines, kotlinSymRegex)
+	case ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".ino":
+		return extractCppSymbols(lines)
 	default:
 		return extractBraceSymbols(lines, tsSymRegex)
 	}
@@ -300,7 +304,16 @@ func extractBraceSymbols(lines []string, declRe *regexp.Regexp) []SymbolInfo {
 		}
 		kind := m[1]
 		name := m[2]
-		end := findBraceEnd(lines, i)
+		if name == "" {
+			if kind != "object" { // Kotlin `companion object {`
+				continue
+			}
+			name = "Companion"
+		}
+		end := findBraceEnd(lines, i, declRe.MatchString)
+		if declRe == kotlinSymRegex && kotlinExprBody.MatchString(lines[i]) {
+			end = i // `fun x(): Int = 1` has no braces
+		}
 		syms = append(syms, SymbolInfo{
 			Kind:      kind,
 			Name:      name,
@@ -312,11 +325,16 @@ func extractBraceSymbols(lines []string, declRe *regexp.Regexp) []SymbolInfo {
 	return syms
 }
 
-func findBraceEnd(lines []string, startIdx int) int {
+// findBraceEnd returns the line closing the block opened at/after startIdx. isDecl stops the search when another
+// declaration starts before any `{` (bodyless declarations must not swallow the next symbol's braces).
+func findBraceEnd(lines []string, startIdx int, isDecl func(string) bool) int {
 	depth := 0
 	seenOpen := false
 	for i := startIdx; i < len(lines); i++ {
 		line := lines[i]
+		if !seenOpen && i > startIdx && isDecl != nil && isDecl(line) {
+			return startIdx
+		}
 		// Strip line comment heuristic
 		if idx := strings.Index(line, "//"); idx >= 0 {
 			line = line[:idx]
@@ -412,6 +430,58 @@ func extractMarkdownSections(lines []string) []SymbolInfo {
 			EndLine:   len(lines),
 		})
 		levels = append(levels, lvl)
+	}
+	return syms
+}
+
+var (
+	kotlinSymRegex = regexp.MustCompile(`^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|internal|open|final|abstract|sealed|data|enum|annotation|inner|value|inline|override|suspend|operator|infix|tailrec|external|const|lateinit|actual|expect|companion)\s+)*(fun|class|interface|object|typealias)\b(?:\s*<[^>]*>)?\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?\.)?([A-Za-z_][A-Za-z0-9_]*)?`)
+	kotlinExprBody = regexp.MustCompile(`^[^{]*\)\s*(?::\s*[^={]+)?=\s*[^=]`)
+
+	cppTypeRegex = regexp.MustCompile(`^\s*(?:template\s*<.*>\s*)?(?:typedef\s+)?(class|struct|union|namespace|enum(?:\s+class|\s+struct)?)\s+(?:\[\[[^\]]*\]\]\s*)?(?:[A-Z][A-Z0-9_]+\s+)?([A-Za-z_]\w*)`)
+	cppFuncRegex = regexp.MustCompile(`^\s*(?:template\s*<.*>\s*)?(?:(?:static|inline|virtual|explicit|constexpr|consteval|extern|friend|const|unsigned|signed|volatile|mutable|[A-Z][A-Z0-9_]+)\s+)*(?:[A-Za-z_][\w:]*(?:<[^;{}()]*>)?[\s*&]+)+?((?:[A-Za-z_]\w*(?:<[^;{}()]*>)?::)*~?[A-Za-z_]\w*)\s*\(`)
+	cppCtorRegex = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*::)+~?[A-Za-z_]\w*)\s*\(`)
+)
+
+var cppNonDecl = map[string]bool{
+	"if": true, "else": true, "for": true, "while": true, "switch": true, "case": true, "do": true, "return": true,
+	"throw": true, "co_return": true, "co_await": true, "delete": true, "new": true, "goto": true, "using": true,
+	"sizeof": true, "catch": true, "decltype": true, "static_assert": true, "alignof": true,
+}
+
+// extractCppSymbols outlines C/C++: namespaces, classes/structs/enums, and function definitions
+// (free, in-class, `Type::method`, ctors/dtors). Pure declarations ending in `;` are skipped.
+func extractCppSymbols(lines []string) []SymbolInfo {
+	syms := []SymbolInfo{}
+	isDecl := func(l string) bool {
+		t := strings.TrimSpace(l)
+		return !strings.HasSuffix(t, ";") && (cppTypeRegex.MatchString(l) || cppFuncRegex.MatchString(l) || cppCtorRegex.MatchString(l))
+	}
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "*") || strings.HasSuffix(t, ";") {
+			continue
+		}
+		if words := strings.FieldsFunc(t, func(r rune) bool { return r == ' ' || r == '(' || r == '\t' }); len(words) == 0 || cppNonDecl[words[0]] {
+			continue
+		}
+		kind, name := "", ""
+		if m := cppTypeRegex.FindStringSubmatch(line); m != nil {
+			kind, name = strings.Fields(m[1])[0], m[2]
+		} else if m := cppFuncRegex.FindStringSubmatch(line); m != nil {
+			kind, name = "func", m[1]
+		} else if m := cppCtorRegex.FindStringSubmatch(line); m != nil {
+			kind, name = "func", m[1]
+		}
+		_, leaf := symbolParts(name)
+		if name == "" || cppNonDecl[leaf] {
+			continue
+		}
+		end := findBraceEnd(lines, i, isDecl)
+		if end == i && !strings.Contains(line, "{") {
+			continue // declaration split across lines or macro-like call without a body
+		}
+		syms = append(syms, SymbolInfo{Kind: kind, Name: name, Signature: t, StartLine: i + 1, EndLine: end + 1})
 	}
 	return syms
 }

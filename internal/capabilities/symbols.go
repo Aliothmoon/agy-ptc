@@ -35,6 +35,16 @@ func symbolParts(name string) (string, string) {
 	if m := goRecvName.FindStringSubmatch(name); m != nil {
 		return m[1], m[2]
 	}
+	if i := strings.LastIndex(name, "::"); i > 0 { // C++ `Ns::Type::method`
+		recv := name[:i]
+		if j := strings.LastIndex(recv, "::"); j >= 0 {
+			recv = recv[j+2:]
+		}
+		if k := strings.IndexByte(recv, '<'); k > 0 {
+			recv = recv[:k]
+		}
+		return recv, name[i+2:]
+	}
 	if i := strings.IndexAny(name, "<("); i > 0 {
 		name = name[:i]
 	}

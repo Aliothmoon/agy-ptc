@@ -88,6 +88,9 @@ func (b *FSSearchBinder) readText(cwd, targetPath string, opts map[string]any) (
 	limit := optInt(opts, "limit", 0)
 	hasRange := startLine > 0 || endLine > 0 || limit > 0
 	withNumbers := optBool(opts, "lineNumbers", false)
+	if tail := optInt(opts, "tail", 0); tail > 0 {
+		return readTailLines(absPath, targetPath, tail, withNumbers)
+	}
 	if info.Size() > MaxSandboxReadBytes {
 		if !hasRange {
 			return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is %d bytes (>2MB); pass { startLine, endLine } or use search.rg", targetPath, info.Size())
@@ -228,18 +231,6 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 				"bytes": len(content),
 			}, nil
 		},
-		"exists": func(_ context.Context, args []any) (any, error) {
-			targetPath, err := requireStringArg(args, 0, "path")
-			if err != nil {
-				return nil, err
-			}
-			absPath, err := b.Policy.ResolveAndCheckRead(env.Cwd, targetPath)
-			if err != nil {
-				return false, nil
-			}
-			_, statErr := os.Stat(absPath)
-			return statErr == nil, nil
-		},
 		"stat": func(_ context.Context, args []any) (any, error) {
 			targetPath, err := requireStringArg(args, 0, "path")
 			if err != nil {
@@ -333,7 +324,22 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 	for name, fn := range b.fileOps(env) {
 		fsAsync[name] = fn
 	}
-	if err := env.SetNamespace("fs", fsAsync, nil); err != nil {
+	// Sync: fs.exists returns a boolean directly, so `if (fs.exists(p))` works even without `await`.
+	fsSync := map[string]sandbox.SyncHostFunc{
+		"exists": func(_ context.Context, args []any) (any, error) {
+			targetPath, err := requireStringArg(args, 0, "path")
+			if err != nil {
+				return nil, err
+			}
+			absPath, err := b.Policy.ResolveAndCheckRead(env.Cwd, targetPath)
+			if err != nil {
+				return false, nil
+			}
+			_, statErr := os.Stat(absPath)
+			return statErr == nil, nil
+		},
+	}
+	if err := env.SetNamespace("fs", fsAsync, fsSync); err != nil {
 		return err
 	}
 
@@ -346,6 +352,9 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			searchRoot, err := b.Policy.ResolveAndCheckRead(env.Cwd, q.path)
 			if err != nil {
 				return nil, err
+			}
+			if q.mode != "" {
+				return b.runListSearch(ctx, env, searchRoot, q)
 			}
 			hits, err := b.runTextOrRegexSearch(ctx, env.Cwd, searchRoot, q)
 			if err == nil && len(hits) >= q.maxResults {
@@ -401,6 +410,7 @@ type searchQuery struct {
 	caseSensitive bool
 	contextLines  int
 	maxResults    int
+	mode          string // "" (hits) | "files" (rg -l) | "count" (rg -c)
 }
 
 func parseSearchQuery(args []any) (searchQuery, error) {
@@ -446,9 +456,19 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 		if q.contextLines > maxContextLines {
 			q.contextLines = maxContextLines
 		}
-		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", defaultRgMaxResults))
+		switch {
+		case optBool(opts, "filesOnly", optBool(opts, "l", optBool(opts, "filesWithMatches", false))):
+			q.mode = "files"
+		case optBool(opts, "count", optBool(opts, "c", false)):
+			q.mode = "count"
+		}
+		defaultMax := defaultRgMaxResults
+		if q.mode != "" {
+			defaultMax = defaultRgListResults
+		}
+		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", defaultMax))
 		if q.maxResults <= 0 {
-			q.maxResults = defaultRgMaxResults
+			q.maxResults = defaultMax
 		}
 		if q.maxResults > 2000 {
 			q.maxResults = 2000

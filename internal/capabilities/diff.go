@@ -100,6 +100,14 @@ func gitDiff(files []diffFile) (string, error) {
 			if r, ok := realName[strings.TrimPrefix(line, "+++ b/")]; ok {
 				line = "+++ b/" + r
 			}
+		case strings.HasPrefix(line, "rename from a/"): // git's rename detection: concise for t.rename
+			if r, ok := realName[strings.TrimPrefix(line, "rename from a/")]; ok {
+				line = "rename from " + r
+			}
+		case strings.HasPrefix(line, "rename to b/"):
+			if r, ok := realName[strings.TrimPrefix(line, "rename to b/")]; ok {
+				line = "rename to " + r
+			}
 		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')

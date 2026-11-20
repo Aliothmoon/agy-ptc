@@ -15,6 +15,9 @@ func installProcessOS(env *ExecutionEnv) error {
 	vars := map[string]any{}
 	for _, kv := range os.Environ() {
 		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			if isSecretEnvName(k) {
+				v = redacted
+			}
 			vars[k] = v
 		}
 	}
@@ -55,6 +58,30 @@ func installProcessOS(env *ExecutionEnv) error {
 		});
 	})()`)
 	return err
+}
+
+// redacted replaces secret-looking env values so `return process.env` never leaks tokens into the
+// conversation or audit logs. Child processes (sh.exec / sh.run) still inherit the real values.
+const redacted = "[redacted]"
+
+var secretEnvSubstrings = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL", "APIKEY", "API_KEY",
+	"ACCESS_KEY", "PRIVATE_KEY", "SECRET_KEY", "COOKIE", "SESSION_KEY", "CONNECTION_STRING"}
+
+var secretEnvSegments = map[string]bool{"KEY": true, "KEYS": true, "AUTH": true, "PAT": true, "PWD": false, "DSN": true}
+
+func isSecretEnvName(name string) bool {
+	up := strings.ToUpper(name)
+	for _, s := range secretEnvSubstrings {
+		if strings.Contains(up, s) {
+			return true
+		}
+	}
+	for _, seg := range strings.FieldsFunc(up, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
+		if secretEnvSegments[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 func nodePlatform() string {

@@ -126,8 +126,8 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename`（`mv`）· `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
-- `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })`
+- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename`（`mv`）· `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults?, filesOnly?, count? })`
 - `search.glob(pattern, { path?, maxResults? })`（支持 `{a,b}` 花括号展开与容错回退）
 - **跨目录 / 外部路径支持**：相对路径始终基于 `cwd` 解析；在策略允许下（默认开启），所有模块均支持直接传入工作区外的绝对路径或 `../` 跨仓路径（如 `D:/OtherRepo/...`）。
 
@@ -137,7 +137,7 @@ const outline = await ast.outline("internal/sandbox/executor.go");
 const sym = await ast.enclosingSymbol("internal/sandbox/executor.go", 320);
 const batch = await ast.outlines(["internal/policy/policy.go", "internal/output/budget.go"]);
 ```
-- `.go` 文件采用标准库 `go/parser` 提取精确起止行号；同时支持 TypeScript、JavaScript、Python、Rust、Java 与 Markdown 符号扫描。
+- `.go` 文件采用标准库 `go/parser` 提取精确起止行号；同时支持 TypeScript、JavaScript、Python、Rust、C/C++、Kotlin、Java 与 Markdown 符号扫描。`ast.read(path, "Type::method")` 直接返回单个符号的源码。
 
 ### 跨文件原子事务修改（`tx.*` & `edit.*`）
 未提交（`commit`）的事务在验证失败、抛出未捕获异常或触发超时时，**会自动恢复内存快照**（完整保留原文件 CRLF/LF 换行符与文件权限）：
@@ -172,7 +172,7 @@ return { committed: true, summary: check.summary };
 ```ts
 const [status, log] = await Promise.all([
   git.status(),                    // 非 Git 目录也不会崩 Promise.all，安全返回 { isRepo: false }
-  git.log("-n 5 --oneline"),
+  git.log({ n: 5 }),               // also git.diff({ staged: true, stat: true }), or plain strings
 ]);
 
 // 默认 settle: true（非零退出码返回 { ok: false, exitCode, timedOut, output }）

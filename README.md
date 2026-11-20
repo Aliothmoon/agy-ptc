@@ -126,8 +126,8 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
-- `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })`
+- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults?, filesOnly?, count? })`
 - `search.glob(pattern, { path?, maxResults? })` (supports `{a,b}` braces + automatic fallback recovery)
 - **External Paths**: Relative paths resolve against `cwd`; external non-sensitive paths (`D:/OtherRepo/...`, `../shared/...`) are also supported across all capabilities unless disabled by policy.
 
@@ -137,7 +137,7 @@ const outline = await ast.outline("internal/sandbox/executor.go");
 const sym = await ast.enclosingSymbol("internal/sandbox/executor.go", 320);
 const batch = await ast.outlines(["internal/policy/policy.go", "internal/output/budget.go"]);
 ```
-- Exact `go/parser` AST for `.go`; fast structural scanner for TypeScript, JavaScript, Python, Rust, Java, and Markdown.
+- Exact `go/parser` AST for `.go`; fast structural scanner for TypeScript, JavaScript, Python, Rust, C/C++, Kotlin, Java, and Markdown. `ast.read(path, "Type::method")` returns one symbol's source.
 
 ### Atomic Multi-File Transactions (`tx.*` & `edit.*`)
 Uncommitted transactions **automatically roll back** byte-for-byte (preserving CRLF/LF and file permissions) if verification fails, an exception is thrown, or `timeoutMs` expires:
@@ -172,7 +172,7 @@ return { committed: true, summary: check.summary };
 ```ts
 const [status, log] = await Promise.all([
   git.status(),                    // Safe in non-git folders too ({ isRepo: false })
-  git.log("-n 5 --oneline"),
+  git.log({ n: 5 }),               // also git.diff({ staged: true, stat: true }), or plain strings
 ]);
 
 // settle: true by default (non-zero exit returns { ok: false, exitCode, timedOut, output })

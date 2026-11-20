@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,9 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			}
 			if len(extra) == 0 {
 				extra = []string{"-n", "10", "--oneline"}
+			} else if _, isObj := args[0].(map[string]any); isObj {
+				// Object form keeps the concise defaults unless overridden: git.log({ n: 5 }) -> 5 oneline entries.
+				extra = withLogDefaults(extra)
 			}
 			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"log"}, extra...))
 		},
@@ -735,48 +739,110 @@ func (b *ShellGitBinder) resolveGitDirAndTail(baseCwd string, args []any) (strin
 			}
 			repoDir = resolved
 		}
-		return repoDir, optionalGitTailArgs(args), nil
+		tail, err := optionalGitTailArgs(args)
+		return repoDir, tail, err
 	}
 	// If first arg is a string with no git flags (e.g. `git.status("D:/OtherRepo")`), check if it's an existing directory
 	if s, ok := args[0].(string); ok && !strings.HasPrefix(strings.TrimSpace(s), "-") && !strings.ContainsAny(s, " \t") {
 		if resolved, err := b.Policy.ResolveAndCheckRead(baseCwd, s); err == nil {
 			if fi, stErr := os.Stat(resolved); stErr == nil && fi.IsDir() {
 				var rest []string
+				var err error
 				if len(args) > 1 {
-					rest = optionalGitTailArgs(args[1:])
+					rest, err = optionalGitTailArgs(args[1:])
 				}
-				return resolved, rest, nil
+				return resolved, rest, err
 			}
 		}
 	}
-	return baseCwd, optionalGitTailArgs(args), nil
+	tail, err := optionalGitTailArgs(args)
+	return baseCwd, tail, err
 }
 
-func optionalGitTailArgs(args []any) []string {
+// git option keys accepted as an object, e.g. git.log({ n: 5, path: "src" }) or git.diff({ staged: true, stat: true }).
+var (
+	gitBoolFlags = map[string]string{
+		"oneline": "--oneline", "stat": "--stat", "shortstat": "--shortstat", "numstat": "--numstat",
+		"nameOnly": "--name-only", "nameStatus": "--name-status", "staged": "--cached", "cached": "--cached",
+		"all": "--all", "noMerges": "--no-merges", "patch": "-p", "graph": "--graph", "reverse": "--reverse",
+	}
+	gitValueFlags = map[string]string{
+		"grep": "--grep=", "since": "--since=", "until": "--until=", "author": "--author=", "format": "--format=",
+	}
+	gitPassKeys = map[string]bool{"cwd": true, "repo": true, "repoPath": true}
+)
+
+// optionalGitTailArgs turns git.* arguments (string, array, or options object) into git args.
+// Unknown object keys are rejected instead of silently ignored.
+func optionalGitTailArgs(args []any) ([]string, error) {
 	if len(args) == 0 || args[0] == nil {
-		return nil
+		return nil, nil
 	}
 	if s, ok := args[0].(string); ok && strings.TrimSpace(s) != "" {
-		return splitCommandArgs(s)
+		return splitCommandArgs(s), nil
 	}
 	if arr, ok := args[0].([]any); ok {
-		return extractStringSlice(arr)
+		return extractStringSlice(arr), nil
 	}
-	if m, ok := args[0].(map[string]any); ok {
-		var out []string
-		if optBool(m, "stat", false) {
-			out = append(out, "--stat")
+	m, ok := args[0].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var flags, refs, extra, paths []string
+	for _, k := range keys {
+		v := m[k]
+		switch {
+		case gitPassKeys[k]:
+		case gitBoolFlags[k] != "":
+			if b, _ := v.(bool); b {
+				flags = append(flags, gitBoolFlags[k])
+			}
+		case gitValueFlags[k] != "":
+			if s := fmt.Sprint(v); s != "" && v != nil {
+				flags = append(flags, gitValueFlags[k]+s)
+			}
+		case k == "n" || k == "limit" || k == "maxCount":
+			if n, ok := toInt(v); ok && n > 0 {
+				flags = append(flags, fmt.Sprintf("-n%d", n))
+			}
+		case k == "unified" || k == "context":
+			if n, ok := toInt(v); ok && n >= 0 {
+				flags = append(flags, fmt.Sprintf("-U%d", n))
+			}
+		case k == "ref" || k == "refs" || k == "range" || k == "rev":
+			refs = append(refs, stringList(v)...)
+		case k == "path" || k == "paths" || k == "file" || k == "files":
+			paths = append(paths, stringList(v)...)
+		case k == "args":
+			if s, ok := v.(string); ok {
+				extra = append(extra, splitCommandArgs(s)...)
+			} else {
+				extra = append(extra, stringList(v)...)
+			}
+		default:
+			return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "unknown git option %q (use n, oneline, stat, nameOnly, nameStatus, staged, grep, since, until, author, format, unified, ref, path, args)", k)
 		}
-		if optBool(m, "staged", optBool(m, "cached", false)) {
-			out = append(out, "--staged")
+	}
+	out := append(append(flags, refs...), extra...)
+	if len(paths) > 0 {
+		out = append(append(out, "--"), paths...)
+	}
+	return out, nil
+}
+
+func stringList(v any) []string {
+	switch x := v.(type) {
+	case string:
+		if x != "" {
+			return []string{x}
 		}
-		if n := optInt(m, "limit", optInt(m, "maxCount", 0)); n > 0 {
-			out = append(out, fmt.Sprintf("-n%d", n))
-		}
-		if p := firstString(m, "path", "file"); p != "" {
-			out = append(out, "--", p)
-		}
-		return out
+	case []any:
+		return extractStringSlice(x)
 	}
 	return nil
 }
@@ -806,4 +872,28 @@ func splitCommandArgs(s string) []string {
 		args = append(args, cur.String())
 	}
 	return args
+}
+
+func withLogDefaults(args []string) []string {
+	hasN, hasFormat := false, false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		switch {
+		case strings.HasPrefix(a, "-n"), strings.HasPrefix(a, "--max-count"):
+			hasN = true
+		case a == "--oneline", strings.HasPrefix(a, "--format"), strings.HasPrefix(a, "--pretty"), a == "-p",
+			a == "--stat", a == "--name-only", a == "--name-status", a == "--shortstat", a == "--numstat":
+			hasFormat = true
+		}
+	}
+	var pre []string
+	if !hasN {
+		pre = append(pre, "-n10")
+	}
+	if !hasFormat {
+		pre = append(pre, "--oneline")
+	}
+	return append(pre, args...)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -300,6 +301,59 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 				tx.touched = append(tx.touched, rel)
 			}
 			return nil, os.Remove(abs)
+		},
+		// t.rename(from, to) / t.mv: moves a file inside the tx; rollback restores both paths.
+		"_rename": func(_ context.Context, args []any) (any, error) {
+			id, _ := requireStringArg(args, 0, "id")
+			from, err := requireStringArg(args, 1, "from")
+			if err != nil {
+				return nil, err
+			}
+			to, err := requireStringArg(args, 2, "to")
+			if err != nil {
+				return nil, err
+			}
+			txMu.Lock()
+			defer txMu.Unlock()
+			tx, ok := txMap[id]
+			if !ok || tx.committed || tx.rolledBack {
+				return nil, fmt.Errorf("transaction '%s' is not active", id)
+			}
+			absFrom, err := b.Policy.ResolveAndCheckWrite(env.Cwd, from)
+			if err != nil {
+				return nil, err
+			}
+			absTo, err := b.Policy.ResolveAndCheckWrite(env.Cwd, to)
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Stat(absFrom)
+			if err != nil {
+				return nil, err
+			}
+			if info.IsDir() {
+				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is a directory; t.rename moves files (fs.rename moves dirs, not rolled back)", from)
+			}
+			src, err := os.ReadFile(absFrom)
+			if err != nil {
+				return nil, err
+			}
+			for _, snap := range []fileSnapshot{
+				{absPath: absFrom, relPath: relDisplayPath(env.Cwd, absFrom), existed: true, origBytes: src},
+				func() fileSnapshot {
+					orig, rErr := os.ReadFile(absTo)
+					return fileSnapshot{absPath: absTo, relPath: relDisplayPath(env.Cwd, absTo), existed: rErr == nil, origBytes: orig}
+				}(),
+			} {
+				if _, seen := tx.snapshots[snap.absPath]; !seen {
+					tx.snapshots[snap.absPath] = snap
+					tx.touched = append(tx.touched, snap.relPath)
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(absTo), 0o755); err != nil {
+				return nil, err
+			}
+			return nil, os.Rename(absFrom, absTo)
 		},
 		// t.diff() -> unified diff of every file touched by the tx (current disk content vs. snapshot).
 		"_diff": func(_ context.Context, args []any) (any, error) {

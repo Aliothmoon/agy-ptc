@@ -859,6 +859,10 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 				}
 			});
 		}
+		if (typeof globalThis.fs === "object" && globalThis.fs !== null && typeof globalThis.fs._bytes === "function") {
+			const rawBytes = globalThis.fs._bytes;
+			globalThis.fs.bytes = async (path, opts) => Buffer.from(await rawBytes(path, opts || {}), "base64");
+		}
 		if (typeof globalThis.tx === "object" && globalThis.tx !== null && typeof globalThis.tx._begin === "function") {
 			const rawTx = globalThis.tx;
 			globalThis.tx = {
@@ -870,6 +874,9 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 						edit: (pathOrSpec, hunks) => rawTx._edit(id, pathOrSpec, hunks),
 						write: (path, content, opts) => rawTx._write(id, path, content, opts || {}),
 						rm: (path) => rawTx._rm(id, path),
+						remove: (path) => rawTx._rm(id, path),
+						rename: (from, to) => rawTx._rename(id, from, to),
+						mv: (from, to) => rawTx._rename(id, from, to),
 						verify: (commands, opts) => rawTx._verify(id, commands, opts || {}),
 						commit: () => rawTx._commit(id),
 						rollback: () => rawTx._rollback(id),
@@ -882,9 +889,10 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 
 		const aliasMap = {
 			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list", readMany: "cat", readFiles: "cat",
-				mv: "rename", move: "rename", copy: "cp", copyFile: "cp", unlink: "rm", remove: "rm", mkdirp: "mkdir" },
+				mv: "rename", move: "rename", copy: "cp", copyFile: "cp", unlink: "rm", remove: "rm", mkdirp: "mkdir",
+				readBytes: "bytes", readBinary: "bytes", readBuffer: "bytes" },
 			search: { grep: "rg", find: "glob", files: "glob" },
-			ast: { symbols: "outline", parse: "outline" },
+			ast: { symbols: "outline", parse: "outline", readSymbol: "read", symbol: "read", getSymbol: "read" },
 			edit: { edit: "apply", patch: "apply" },
 			sh: { bash: "exec", pwsh: "exec", check: "checks", execFile: "run", spawn: "run" },
 			state: { load: "get", store: "set", del: "delete", remove: "delete" },
