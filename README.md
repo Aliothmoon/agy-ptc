@@ -105,6 +105,8 @@ Allow `mcp(agy-ptc_ptc/exec)` so PTC runs without repetitive approval prompts, a
 1. **Hybrid Mode (Default)**: Active automatically in every `agy` session once installed. Quick 1–3 file reads use native `read_file`; multi-step exploration, AST inspection, transactional refactoring, and `<15s` checks route through `mcp_agy-ptc_ptc_exec`; `>15s` tasks use native `run_command` + `manage_task`.
 2. **Strict Code Mode (`ptc` Agent)**: Start `agy --agent ptc` (or select `ptc` via `/agents`) to run a dedicated Code Mode agent whose system prompt and tool allowlist center strictly around `mcp_agy-ptc_ptc_exec`.
 
+> **Note (Antigravity Desktop Swarm)**: Fresh `swarm(action="add")` workers do not inherit configured MCP servers unless spawned with `fork` (e.g., `fork="coordinator"`); see [forum issue #201194](https://discuss.ai.google.dev/t/bug-fresh-swarm-workers-cannot-access-configured-mcp-servers-call-mcp-tool-missing-context-permission-denied/201194).
+
 ---
 
 ## Sandbox TypeScript API Reference

@@ -113,11 +113,16 @@ func NewEngine(workspaceDir string, extraRoots ...string) *Engine {
 		}
 		settingsPath := filepath.Join(home, ".gemini", "antigravity-cli", "settings.json")
 		e.loadSettingsFile(settingsPath)
+		e.loadSettingsFile(filepath.Join(home, ".gemini", "config", "agy-ptc", "policy.json"))
+	}
+	if pd := strings.TrimSpace(os.Getenv("PLUGIN_DATA")); pd != "" {
+		e.loadSettingsFile(filepath.Join(pd, "policy.json"))
 	}
 	return e
 }
 
-// LoadSettingsJSON loads CLI settings JSON directly (useful for testing and custom configs).
+// LoadSettingsJSON loads CLI or desktop policy JSON directly (useful for testing and custom configs).
+// Subsequent calls override AllowNonWorkspaceAccess if set and append permission rules.
 func (e *Engine) LoadSettingsJSON(raw []byte) {
 	var cfg cliSettings
 	if err := json.Unmarshal(raw, &cfg); err != nil {
@@ -126,9 +131,9 @@ func (e *Engine) LoadSettingsJSON(raw []byte) {
 	if cfg.AllowNonWorkspaceAccess != nil {
 		e.allowNonWorkspaceAccess = *cfg.AllowNonWorkspaceAccess
 	}
-	e.denyRules = parseRuleList(cfg.Permissions.Deny)
-	e.askRules = parseRuleList(cfg.Permissions.Ask)
-	e.allowRules = parseRuleList(cfg.Permissions.Allow)
+	e.denyRules = append(e.denyRules, parseRuleList(cfg.Permissions.Deny)...)
+	e.askRules = append(e.askRules, parseRuleList(cfg.Permissions.Ask)...)
+	e.allowRules = append(e.allowRules, parseRuleList(cfg.Permissions.Allow)...)
 }
 
 func (e *Engine) loadSettingsFile(path string) {

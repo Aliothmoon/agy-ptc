@@ -74,3 +74,28 @@ func TestPolicySettingsPrecedenceAndDestructiveCommands(t *testing.T) {
 		t.Fatalf("expected zvec_grep_search allowed, got: %v", err)
 	}
 }
+
+func TestPolicyDesktopPluginDataPolicyOverride(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	pluginData := t.TempDir()
+	t.Setenv("PLUGIN_DATA", pluginData)
+
+	policyJSON := `{
+		"allowNonWorkspaceAccess": false,
+		"permissions": {
+			"deny": ["write_file(blocked_dir/)"]
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(pluginData, "policy.json"), []byte(policyJSON), 0o644); err != nil {
+		t.Fatalf("write policy.json: %v", err)
+	}
+
+	eng := NewEngine(ws)
+	if _, err := eng.ResolveAndCheckWrite(ws, filepath.Join(outside, "out.txt")); err == nil {
+		t.Fatal("expected outside write blocked by PLUGIN_DATA/policy.json")
+	}
+	if _, err := eng.ResolveAndCheckWrite(ws, "blocked_dir/file.txt"); err == nil {
+		t.Fatal("expected blocked_dir write denied by PLUGIN_DATA/policy.json")
+	}
+}

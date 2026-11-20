@@ -105,6 +105,8 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 1. **混合模式（Hybrid Mode，默认推荐）**：安装后自动在所有 `agy` 会话中生效。少量已知小文件继续走零开销原生 `read_file`；多步搜索、AST 分析、跨文件事务修改与 `<15s` 快速校验优先走 `mcp_agy-ptc_ptc_exec`；`>15s` 长任务走原生 `run_command` + `manage_task`。
 2. **纯粹 Code Mode（`ptc` 专属 Agent）**：通过 `agy --agent ptc` 启动（或在对话中输入 `/agents` 切换至 `ptc`），使用聚焦于 `mcp_agy-ptc_ptc_exec` 的精简工具集运行。
 
+> **注（Antigravity 桌面端 Swarm 限制）**：桌面版中无 `fork` 的新 `swarm(action="add")` worker 不会继承已配置的 MCP 服务，需通过 `fork`（如 `fork="coordinator"`）拉起；详见[官方论坛 #201194](https://discuss.ai.google.dev/t/bug-fresh-swarm-workers-cannot-access-configured-mcp-servers-call-mcp-tool-missing-context-permission-denied/201194)。
+
 ---
 
 ## 沙箱 TypeScript API 速查

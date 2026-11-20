@@ -695,10 +695,24 @@ func writeExecutableSafe(dstPath string, data []byte) error {
 }
 
 func defaultCacheDataDir() string {
+	if pd := strings.TrimSpace(os.Getenv("PLUGIN_DATA")); pd != "" {
+		return pd
+	}
 	h := userHomeDir()
-	cliData := filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", pluginName)
-	if fi, err := os.Stat(cliData); err == nil && fi.IsDir() {
-		return cliData
+	candidates := []string{
+		filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", pluginName),
+		filepath.Join(h, ".gemini", "antigravity", "plugin_data", pluginName),
+		filepath.Join(h, ".gemini", "config", "plugin_data", pluginName),
+	}
+	for _, dir := range candidates {
+		if fi, err := os.Stat(filepath.Join(dir, "logs")); err == nil && fi.IsDir() {
+			return dir
+		}
+	}
+	for _, dir := range candidates {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return dir
+		}
 	}
 	return filepath.Join(h, ".gemini", "cache", pluginName)
 }
