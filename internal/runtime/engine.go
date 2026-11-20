@@ -419,7 +419,16 @@ func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateSto
 		spillKey := store.SaveAutoSpill(res.Value)
 		hint := ""
 		if spillKey != "" {
+			sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full intact object saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillKey)
 			hint = fmt.Sprintf("; full object saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
+			currentUsed = 0
+			for _, s := range sections {
+				currentUsed += len(s) + 2
+			}
+			availForResult = maxOutBytes - currentUsed - 24
+			if availForResult < 800 {
+				availForResult = 800
+			}
 		}
 		preview := output.TruncateHeadTailBytes("Result:\n"+serialized, availForResult, hint)
 		sections = append(sections, preview)

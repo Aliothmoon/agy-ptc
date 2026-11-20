@@ -620,3 +620,64 @@ func TestPromiseAllSiblingErrorCancelsShellWithoutFalseTimeout(t *testing.T) {
 		t.Fatalf("canceled sibling sh.exec must not misreport TIMED OUT, got: %s", out)
 	}
 }
+
+func TestNamespaceFeatureDetectionDoesNotThrowWhileDirectCallStillRaisesUnknownMethod(t *testing.T) {
+	ws := t.TempDir()
+	_ = os.WriteFile(filepath.Join(ws, "hello.txt"), []byte("hi"), 0o644)
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	// 1. Feature detection (`fs.search ? ...`, `typeof`, optional chaining) must evaluate cleanly without throwing
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const files = await (fs.search ? Promise.resolve(["wrong"]) : search.glob("*.txt"));
+			const hasReadLines = typeof (fs as any).readLines === "function";
+			const optCall = (fs as any).readLines?.("hello.txt");
+			return { files, hasReadLines, optCall: optCall === undefined };
+		`,
+	})
+	if isErr {
+		t.Fatalf("expected feature detection to succeed, got error: %s", out)
+	}
+	for _, needle := range []string{`"hello.txt"`, `"hasReadLines": false`, `"optCall": true`} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("expected %q in output, got: %s", needle, out)
+		}
+	}
+
+	// 2. Direct call to missing namespace method must still report UnknownMethodError with available methods
+	outCall, isErrCall := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:  ws,
+		Code: `return await (sh as any).tree(".");`,
+	})
+	if !isErrCall || !strings.Contains(outCall, "UnknownMethodError") || !strings.Contains(outCall, "Available methods on 'sh'") {
+		t.Fatalf("expected UnknownMethodError for sh.tree(), got: %s", outCall)
+	}
+
+	// 3. Unrelated TypeError after feature detection must NOT be misattributed as UnknownMethodError
+	outUnrel, isErrUnrel := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const probe = (fs as any).search ? 1 : 0;
+			return ({ a: probe } as any).endsWith("x");
+		`,
+	})
+	if !isErrUnrel || strings.Contains(outUnrel, "UnknownMethodError") {
+		t.Fatalf("unrelated TypeError must not be misattributed as UnknownMethodError, got: %s", outUnrel)
+	}
+
+	// 4. Auto-spilled large response puts state.get('__result_...') notice in the very first header line
+	outSpill, isErrSpill := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:            ws,
+		MaxOutputBytes: 4000,
+		Code:           `return { blob: "x".repeat(12000) };`,
+	})
+	if isErrSpill {
+		t.Fatalf("unexpected error on large result: %s", outSpill)
+	}
+	firstLine := strings.SplitN(outSpill, "\n", 2)[0]
+	if !strings.Contains(firstLine, "state.get('__result_") || !strings.Contains(firstLine, "truncated preview") {
+		t.Fatalf("expected auto-spill header notice on line 1, got: %s", firstLine)
+	}
+}

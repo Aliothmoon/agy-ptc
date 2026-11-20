@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -581,9 +582,11 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 				}
 			}
 		}
+		formattedMsg := compiler.FormatRuntimeError(msg, cr)
+		formattedMsg = enrichUnknownMethodError(vm, formattedMsg, cr)
 		return nil, &ExecutionError{
 			Phase:      "runtime",
-			Message:    compiler.FormatRuntimeError(msg, cr),
+			Message:    formattedMsg,
 			Logs:       env.getLogs(),
 			Traces:     traces,
 			DurationMs: time.Since(start).Milliseconds(),
@@ -608,9 +611,13 @@ func (env *ExecutionEnv) wrapRuntimeErr(err error, cr *compiler.CompileResult, s
 	if errors.As(err, &interrupted) || errors.Is(env.Ctx.Err(), context.DeadlineExceeded) {
 		phase = "timeout"
 	}
+	formattedMsg := compiler.FormatRuntimeError(err.Error(), cr)
+	if phase == "runtime" {
+		formattedMsg = enrichUnknownMethodError(env.VM, formattedMsg, cr)
+	}
 	return &ExecutionError{
 		Phase:       phase,
-		Message:     compiler.FormatRuntimeError(err.Error(), cr),
+		Message:     formattedMsg,
 		TimedOutOps: env.snapshotInFlight(),
 		Logs:        env.getLogs(),
 		Traces:      env.getTraces(),
@@ -751,6 +758,7 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 			state: { load: "get", store: "set", del: "delete", remove: "delete" },
 		};
 
+		globalThis.__ptcLastMissingMethod = null;
 		for (const ns of ["fs", "search", "ast", "edit", "tx", "git", "sh", "state", "tools"]) {
 			const base = globalThis[ns];
 			if (typeof base !== "object" || base === null) continue;
@@ -763,12 +771,84 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 					}
 					if (prop in t) return t[prop];
 					if (prop in aliases) return t[aliases[prop]];
-					throw new Error("UnknownMethodError: '" + ns + "." + prop + "' does not exist. Available methods on '" + ns + "': " + validKeys.join(", "));
+					globalThis.__ptcLastMissingMethod = { ns, prop, validKeys };
+					return undefined;
 				}
 			});
 		}
 	})()`)
 	return err
+}
+
+var (
+	gojaNoMemberRegex  = regexp.MustCompile(`TypeError:\s+Object has no member '([^']+)'`)
+	gojaNotFuncRegex   = regexp.MustCompile(`TypeError:\s+(?:Value is not an object:\s*undefined|Value is not a function|Property '([^']+)' of object .* is not a function|([^ \n]+) is not a function)`)
+	codeStackLineRegex = regexp.MustCompile(`code:(\d+):\d+`)
+)
+
+// enrichUnknownMethodError upgrades Goja's generic TypeError on a missing PTC namespace method call
+// (e.g. `sh.tree(...)` or `fs.totallyMadeUpMethod(...)`) into an actionable UnknownMethodError,
+// while allowing non-throwing feature checks like `fs.search ? ... : ...` to evaluate to undefined.
+func enrichUnknownMethodError(vm *goja.Runtime, formattedMsg string, cr *compiler.CompileResult) string {
+	if vm == nil || !strings.Contains(formattedMsg, "TypeError:") {
+		return formattedMsg
+	}
+	val := vm.Get("__ptcLastMissingMethod")
+	if val == nil || goja.IsUndefined(val) || goja.IsNull(val) {
+		return formattedMsg
+	}
+	m, ok := val.Export().(map[string]any)
+	if !ok {
+		return formattedMsg
+	}
+	ns, _ := m["ns"].(string)
+	prop, _ := m["prop"].(string)
+	if ns == "" || prop == "" {
+		return formattedMsg
+	}
+	var validKeys []string
+	switch vk := m["validKeys"].(type) {
+	case []any:
+		for _, item := range vk {
+			if s, ok := item.(string); ok {
+				validKeys = append(validKeys, s)
+			}
+		}
+	case []string:
+		validKeys = vk
+	}
+
+	matched := false
+	if sub := gojaNoMemberRegex.FindStringSubmatch(formattedMsg); len(sub) >= 2 {
+		matched = sub[1] == prop
+	} else if sub := gojaNotFuncRegex.FindStringSubmatch(formattedMsg); len(sub) >= 1 {
+		if sub[1] != "" {
+			matched = sub[1] == prop
+		} else if sub[2] != "" {
+			matched = sub[2] == prop || strings.HasSuffix(sub[2], "."+prop)
+		} else {
+			matched = true
+		}
+	}
+	if !matched {
+		return formattedMsg
+	}
+	// Guard against unrelated TypeErrors sharing the same property name by confirming the failing line references `ns` and `prop`.
+	if cr != nil && len(cr.SourceLine) > 0 {
+		if loc := codeStackLineRegex.FindStringSubmatch(formattedMsg); len(loc) >= 2 {
+			if lineNo, err := strconv.Atoi(loc[1]); err == nil && lineNo >= 1 && lineNo <= len(cr.SourceLine) {
+				srcLine := cr.SourceLine[lineNo-1]
+				if !strings.Contains(srcLine, ns) || !strings.Contains(srcLine, prop) {
+					return formattedMsg
+				}
+			}
+		}
+	}
+	header := fmt.Sprintf("Error: UnknownMethodError: '%s.%s' does not exist. Available methods on '%s': %s", ns, prop, ns, strings.Join(validKeys, ", "))
+	if nl := strings.IndexByte(formattedMsg, '\n'); nl >= 0 {
+		return header + formattedMsg[nl:]
+	}
+	return header
 }
 
 func formatRejectedValue(vm *goja.Runtime, rej goja.Value) string {
