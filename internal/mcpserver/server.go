@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -214,9 +216,18 @@ func (s *Server) handleSingle(ctx context.Context, req jsonRPCRequest) *jsonRPCR
 	switch req.Method {
 	case "initialize":
 		var params struct {
-			ProtocolVersion string `json:"protocolVersion"`
+			ProtocolVersion  string `json:"protocolVersion"`
+			RootPath         string `json:"rootPath"`
+			RootURI          string `json:"rootUri"`
+			WorkspaceFolders []struct {
+				URI  string `json:"uri"`
+				Name string `json:"name"`
+			} `json:"workspaceFolders"`
 		}
 		_ = json.Unmarshal(req.Params, &params)
+		if ws := extractInitWorkspace(params.RootPath, params.RootURI, params.WorkspaceFolders); ws != "" && s.Engine != nil {
+			s.Engine.SetClientWorkspace(ws)
+		}
 		proto := DefaultProtocolVersion
 		if supportedProtocols[strings.TrimSpace(params.ProtocolVersion)] {
 			proto = strings.TrimSpace(params.ProtocolVersion)
@@ -327,7 +338,7 @@ func execToolDefinition() map[string]any {
 				},
 				"cwd": map[string]any{
 					"type":        "string",
-					"description": "Workspace root directory for relative paths and commands.",
+					"description": "Absolute path of the active workspace root directory (required so relative paths in fs/search/ast/edit/git/sh resolve against your project).",
 				},
 				"title": map[string]any{
 					"type":        "string",
@@ -340,9 +351,43 @@ func execToolDefinition() map[string]any {
 					"description": "Optional execution deadline in milliseconds (default 60000).",
 				},
 			},
-			"required": []string{"code"},
+			"required": []string{"code", "cwd"},
 		},
 	}
+}
+
+func extractInitWorkspace(rootPath, rootURI string, folders []struct {
+	URI  string `json:"uri"`
+	Name string `json:"name"`
+}) string {
+	if strings.TrimSpace(rootPath) != "" {
+		return strings.TrimSpace(rootPath)
+	}
+	if p := fileURIToPath(rootURI); p != "" {
+		return p
+	}
+	for _, f := range folders {
+		if p := fileURIToPath(f.URI); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func fileURIToPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(raw), "file://") {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	p := u.Path
+	if runtime.GOOS == "windows" && len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return p
 }
 
 func parseContentLength(hdr string) int {

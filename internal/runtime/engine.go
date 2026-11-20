@@ -33,14 +33,15 @@ type LiveStatus struct {
 
 // Engine manages workspace-scoped capability instances, state stores, audit logs, and PTC program execution.
 type Engine struct {
-	dataDir      string
-	defaultCwd   string
-	auditor      *audit.Logger
-	mu           sync.Mutex
-	stores       map[string]*capabilities.StateStore
-	bridges      map[string]*capabilities.MCPBridge
-	totalRuns    atomic.Int64
-	totalHostOps atomic.Int64
+	dataDir         string
+	defaultCwd      string
+	clientWorkspace string
+	auditor         *audit.Logger
+	mu              sync.Mutex
+	stores          map[string]*capabilities.StateStore
+	bridges         map[string]*capabilities.MCPBridge
+	totalRuns       atomic.Int64
+	totalHostOps    atomic.Int64
 }
 
 // NewEngine creates a PTC runtime engine.
@@ -83,15 +84,30 @@ type ExecInput struct {
 	TimeoutMs int               `json:"timeoutMs,omitempty"`
 }
 
+// SetClientWorkspace records a workspace root reported by the MCP client during `initialize`.
+func (e *Engine) SetClientWorkspace(ws string) {
+	ws = strings.TrimSpace(ws)
+	if ws == "" {
+		return
+	}
+	e.mu.Lock()
+	e.clientWorkspace = ws
+	e.mu.Unlock()
+}
+
 // RunMCPExec executes a PTC TypeScript program and returns an inline-safe (`<= 8,800 B` UTF-8) formatted response.
 func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isError bool) {
-	cwd := strings.TrimSpace(in.Cwd)
-	if cwd == "" {
-		cwd = e.defaultCwd
-	}
-	absCwd, err := filepath.Abs(cwd)
-	if err == nil {
-		cwd = absCwd
+	cwd, cwdErr := e.resolveEffectiveCwd(in.Cwd)
+	if cwdErr != nil {
+		msg := "[ptc workspace error]\n" + cwdErr.Error()
+		e.auditor.Record(audit.Entry{
+			Title:         in.Title,
+			Status:        "runtime_error",
+			ErrorCategory: "missing_workspace_cwd",
+			ErrorMessage:  cwdErr.Error(),
+			Code:          in.Code,
+		})
+		return msg, true
 	}
 
 	pol := policy.NewEngine(cwd)
@@ -251,6 +267,81 @@ func countFailedTraces(traces []sandbox.OpTrace) int {
 		}
 	}
 	return n
+}
+
+// resolveEffectiveCwd ensures relative paths (`"go.mod"`, `"internal/..."`) NEVER accidentally resolve against
+// `~/.gemini/config/plugins/agy-ptc` (which is the OS working directory when Antigravity spawns a plugin MCP server).
+func (e *Engine) resolveEffectiveCwd(explicitCwd string) (string, error) {
+	if c := strings.TrimSpace(explicitCwd); c != "" {
+		if abs, err := filepath.Abs(c); err == nil {
+			return abs, nil
+		}
+		return c, nil
+	}
+
+	e.mu.Lock()
+	clientWs := e.clientWorkspace
+	e.mu.Unlock()
+	if clientWs != "" {
+		if abs, err := filepath.Abs(clientWs); err == nil {
+			return abs, nil
+		}
+		return clientWs, nil
+	}
+
+	// If defaultCwd is NOT the plugin installation directory (e.g. standalone `agy-ptc run` in a repo), use it directly.
+	if e.defaultCwd != "" && !isPluginInstallDir(e.defaultCwd) {
+		if abs, err := filepath.Abs(e.defaultCwd); err == nil {
+			return abs, nil
+		}
+		return e.defaultCwd, nil
+	}
+
+	// Fallback to the active workspace recorded by the SessionStart hook (`active-workspace.json`).
+	if hinted := e.readWorkspaceHint(); hinted != "" {
+		return hinted, nil
+	}
+
+	return "", errors.New("WorkspaceError: 'cwd' parameter was omitted and MCP process working directory is the plugin folder (~/.gemini/config/plugins/agy-ptc). Pass your active workspace path in 'cwd' (e.g. cwd: 'F:/Project/...') so relative paths resolve against your project.")
+}
+
+func (e *Engine) readWorkspaceHint() string {
+	var dirs []string
+	if e.dataDir != "" {
+		dirs = append(dirs, e.dataDir)
+	}
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		dirs = append(dirs,
+			filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", "agy-ptc"),
+			filepath.Join(h, ".gemini", "antigravity", "plugin_data", "agy-ptc"),
+		)
+	}
+	for _, d := range dirs {
+		raw, err := os.ReadFile(filepath.Join(d, "active-workspace.json"))
+		if err != nil {
+			continue
+		}
+		var parsed struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(raw, &parsed) == nil && strings.TrimSpace(parsed.Cwd) != "" {
+			if fi, stErr := os.Stat(parsed.Cwd); stErr == nil && fi.IsDir() && !isPluginInstallDir(parsed.Cwd) {
+				return parsed.Cwd
+			}
+		}
+	}
+	return ""
+}
+
+func isPluginInstallDir(p string) bool {
+	norm := strings.ToLower(filepath.ToSlash(filepath.Clean(p)))
+	if pr := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); pr != "" {
+		normPR := strings.ToLower(filepath.ToSlash(filepath.Clean(pr)))
+		if norm == normPR || strings.HasPrefix(norm, normPR+"/") {
+			return true
+		}
+	}
+	return strings.Contains(norm, "/.gemini/config/plugins/agy-ptc") || strings.Contains(norm, "/.agents/plugins/agy-ptc")
 }
 
 func (e *Engine) workspaceResources(cwd string, pol *policy.Engine) (*capabilities.StateStore, *capabilities.MCPBridge) {

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -75,36 +77,62 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 	}
 
 	gitAsync := map[string]sandbox.AsyncHostFunc{
-		"status": func(ctx context.Context, _ []any) (any, error) {
-			return runGitStructuredStatus(ctx, env.Cwd)
+		"status": func(ctx context.Context, args []any) (any, error) {
+			repoDir, _, err := b.resolveGitDirAndTail(env.Cwd, args)
+			if err != nil {
+				return nil, err
+			}
+			return runGitStructuredStatus(ctx, repoDir)
 		},
 		"diff": func(ctx context.Context, args []any) (any, error) {
-			extra := optionalGitTailArgs(args)
-			return runReadOnlyGitSoft(ctx, env.Cwd, append([]string{"diff"}, extra...))
+			repoDir, extra, err := b.resolveGitDirAndTail(env.Cwd, args)
+			if err != nil {
+				return nil, err
+			}
+			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"diff"}, extra...))
 		},
 		"log": func(ctx context.Context, args []any) (any, error) {
-			extra := optionalGitTailArgs(args)
+			repoDir, extra, err := b.resolveGitDirAndTail(env.Cwd, args)
+			if err != nil {
+				return nil, err
+			}
 			if len(extra) == 0 {
 				extra = []string{"-n", "10", "--oneline"}
 			}
-			return runReadOnlyGitSoft(ctx, env.Cwd, append([]string{"log"}, extra...))
+			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"log"}, extra...))
 		},
 		"show": func(ctx context.Context, args []any) (any, error) {
-			extra := optionalGitTailArgs(args)
+			repoDir, extra, err := b.resolveGitDirAndTail(env.Cwd, args)
+			if err != nil {
+				return nil, err
+			}
 			if len(extra) == 0 {
 				extra = []string{"--stat", "HEAD"}
 			}
-			return runReadOnlyGitSoft(ctx, env.Cwd, append([]string{"show"}, extra...))
+			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"show"}, extra...))
 		},
-		"branch": func(ctx context.Context, _ []any) (any, error) {
-			return runReadOnlyGitSoft(ctx, env.Cwd, []string{"branch", "--list", "-v"})
+		"branch": func(ctx context.Context, args []any) (any, error) {
+			repoDir, _, err := b.resolveGitDirAndTail(env.Cwd, args)
+			if err != nil {
+				return nil, err
+			}
+			return runReadOnlyGitSoft(ctx, repoDir, []string{"branch", "--list", "-v"})
 		},
 		"blame": func(ctx context.Context, args []any) (any, error) {
 			targetPath, opts, err := parsePathAndOpts(args)
 			if err != nil {
 				return nil, err
 			}
-			if _, err := b.Policy.ResolveAndCheckRead(env.Cwd, targetPath); err != nil {
+			repoDir := env.Cwd
+			if subCwd := firstString(opts, "cwd", "repo"); subCwd != "" {
+				resolvedRepo, rErr := b.Policy.ResolveAndCheckRead(env.Cwd, subCwd)
+				if rErr != nil {
+					return nil, rErr
+				}
+				repoDir = resolvedRepo
+			}
+			absFile, err := b.Policy.ResolveAndCheckRead(repoDir, targetPath)
+			if err != nil {
 				return nil, err
 			}
 			gitArgs := []string{"blame"}
@@ -113,19 +141,31 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if sLine > 0 && eLine >= sLine {
 				gitArgs = append(gitArgs, fmt.Sprintf("-L%d,%d", sLine, eLine))
 			}
-			gitArgs = append(gitArgs, "--", targetPath)
-			return runReadOnlyGitSoft(ctx, env.Cwd, gitArgs)
+			gitArgs = append(gitArgs, "--", absFile)
+			return runReadOnlyGitSoft(ctx, filepath.Dir(absFile), gitArgs)
 		},
 		"query": func(ctx context.Context, args []any) (any, error) {
 			rawCmd, err := requireStringArg(args, 0, "subcommand")
 			if err != nil {
 				return nil, err
 			}
+			repoDir := env.Cwd
+			if len(args) > 1 {
+				if m, ok := args[1].(map[string]any); ok {
+					if subCwd := firstString(m, "cwd", "repo", "path"); subCwd != "" {
+						resolved, rErr := b.Policy.ResolveAndCheckRead(env.Cwd, subCwd)
+						if rErr != nil {
+							return nil, rErr
+						}
+						repoDir = resolved
+					}
+				}
+			}
 			tokens := splitCommandArgs(rawCmd)
 			if len(tokens) > 0 && tokens[0] == "git" {
 				tokens = tokens[1:]
 			}
-			return runReadOnlyGitSoft(ctx, env.Cwd, tokens)
+			return runReadOnlyGitSoft(ctx, repoDir, tokens)
 		},
 	}
 	return env.SetNamespace("git", gitAsync, nil)
@@ -494,6 +534,38 @@ func parseCmdAndOpts(args []any) (string, map[string]any, error) {
 		return c, m, nil
 	}
 	return "", nil, errors.New("invalid sh.exec arguments")
+}
+
+// resolveGitDirAndTail supports targeting external repositories via `{ cwd: "D:/OtherRepo", ... }`
+// (or passing a directory path to `git.status("D:/OtherRepo")`).
+func (b *ShellGitBinder) resolveGitDirAndTail(baseCwd string, args []any) (string, []string, error) {
+	if len(args) == 0 || args[0] == nil {
+		return baseCwd, nil, nil
+	}
+	if m, ok := args[0].(map[string]any); ok {
+		repoDir := baseCwd
+		if sub := firstString(m, "cwd", "repo", "repoPath"); sub != "" {
+			resolved, err := b.Policy.ResolveAndCheckRead(baseCwd, sub)
+			if err != nil {
+				return "", nil, err
+			}
+			repoDir = resolved
+		}
+		return repoDir, optionalGitTailArgs(args), nil
+	}
+	// If first arg is a string with no git flags (e.g. `git.status("D:/OtherRepo")`), check if it's an existing directory
+	if s, ok := args[0].(string); ok && !strings.HasPrefix(strings.TrimSpace(s), "-") && !strings.ContainsAny(s, " \t") {
+		if resolved, err := b.Policy.ResolveAndCheckRead(baseCwd, s); err == nil {
+			if fi, stErr := os.Stat(resolved); stErr == nil && fi.IsDir() {
+				var rest []string
+				if len(args) > 1 {
+					rest = optionalGitTailArgs(args[1:])
+				}
+				return resolved, rest, nil
+			}
+		}
+	}
+	return baseCwd, optionalGitTailArgs(args), nil
 }
 
 func optionalGitTailArgs(args []any) []string {

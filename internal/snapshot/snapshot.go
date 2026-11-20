@@ -79,6 +79,8 @@ func RunSessionStartHook(in io.Reader, out io.Writer) {
 		return
 	}
 
+	persistActiveWorkspaceHint(ws)
+
 	snap := BuildWorkspaceSnapshot(ws, 1500)
 	if snap == "" {
 		_, _ = out.Write([]byte("{}\n"))
@@ -311,5 +313,36 @@ func readBounded(r io.Reader, timeout time.Duration) ([]byte, error) {
 		return out.data, out.err
 	case <-time.After(timeout):
 		return nil, context.DeadlineExceeded
+	}
+}
+
+// persistActiveWorkspaceHint records the session's workspace directory into plugin_data so the resident MCP server
+// can resolve relative paths accurately even if an LLM call ever omits `cwd` (since Antigravity spawns plugin MCP servers with cwd=<plugin-root>).
+func persistActiveWorkspaceHint(ws string) {
+	abs, err := filepath.Abs(ws)
+	if err != nil {
+		abs = ws
+	}
+	payload, err := json.Marshal(map[string]string{
+		"cwd":       abs,
+		"updatedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return
+	}
+	var dirs []string
+	if pd := strings.TrimSpace(os.Getenv("PLUGIN_DATA")); pd != "" {
+		dirs = append(dirs, pd)
+	}
+	if h, hErr := os.UserHomeDir(); hErr == nil && h != "" {
+		dirs = append(dirs,
+			filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", "agy-ptc"),
+			filepath.Join(h, ".gemini", "antigravity", "plugin_data", "agy-ptc"),
+		)
+	}
+	for _, d := range dirs {
+		if os.MkdirAll(d, 0o755) == nil {
+			_ = os.WriteFile(filepath.Join(d, "active-workspace.json"), payload, 0o600)
+		}
 	}
 }

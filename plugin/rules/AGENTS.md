@@ -7,12 +7,13 @@ Use **`mcp_agy-ptc_ptc_exec`** (eagerly loaded native tool) to collapse multi-st
 | Scenario | Preferred Tool | Why |
 | :--- | :--- | :--- |
 | Read 1–3 known small files (`<300` lines) or known line slices | Built-in `read_file` (in parallel) | Locally allowlisted (~7ms, 46 KB/call inline) |
-| **Any `>=2`-step or data-dependent chain** (search -> outline -> read -> filter -> edit -> verify), loops over files, or `>=2` shell checks | **`mcp_agy-ptc_ptc_exec`** (`{ code, payloads?, cwd?, title? }`) | Runs locally in `<5ms` isolated TS VM; intermediate data stays in sandbox memory (0 context bloat, 0 `output.txt` spills) |
+| **Any `>=2`-step or data-dependent chain** (search -> outline -> read -> filter -> edit -> verify), loops over files, or `>=2` shell checks | **`mcp_agy-ptc_ptc_exec`** (`{ cwd, code, payloads?, title? }`) | Runs locally in `<5ms` isolated TS VM; intermediate data stays in sandbox memory (0 context bloat, 0 `output.txt` spills) |
 | Multi-file or multi-hunk refactoring that should roll back if build/tests fail | **`mcp_agy-ptc_ptc_exec` with `tx.begin()`** | Snapshots originals in memory, runs concurrent `verify`, and auto-rolls back on test/compile failure |
 | Macro multi-agent fan-out across independent subsystems | Built-in `run_workflow` or `swarm` (instruct workers in `brief` to use `mcp_agy-ptc_ptc_exec`) | Parallel LLM reasoning + PTC inside each worker |
 
 ## Sandbox API Quick Reference (`code` is an async TypeScript function body)
 
+- **Paths**: Relative paths resolve against `cwd`; **external absolute paths or `../` cross-repo paths** (`D:/OtherRepo/...`, `~/...`) are also supported across `fs.*`, `search.*`, `ast.*`, `edit.*`, `tx.*`, `git.*` (`{ cwd }`), and `sh.*` (`{ cwd }`).
 - **Payloads (`P` / `payloads`)**: Put multiline replacement code or templates in top-level `payloads: { newFunc: "..." }` and reference `P.newFunc` inside `code` (avoids nested JSON string escaping).
 - **`search`**:
   - `await search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })` -> `Array<{ file, line, column, text, match }>`

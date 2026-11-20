@@ -1,11 +1,16 @@
 ---
 name: ptc-refactor
 description: >-
-  Execute a safe, evidence-gated multi-file codebase refactoring in minimal turns
-  using AgyPTC AST discovery and atomic rollback transactions.
+  [DEFAULT RECOMMENDED FOR MULTI-EDIT & REFACTORING] Default to PTC Mode
+  (`mcp_agy-ptc_ptc_exec` with `tx.begin()`) whenever editing >=2 code hunks/files
+  or pairing code changes with build/lint/test verification, ensuring atomic
+  rollback on failure in minimal turns.
 ---
 
 # Transactional Multi-File Refactoring Workflow (`/ptc-refactor`)
+
+> [!IMPORTANT]
+> **Default to PTC Transactional Mode**: Whenever a task modifies multiple locations/files or requires post-edit verification (`go test`, `tsc`, `eslint`, `pytest`), prefer `mcp_agy-ptc_ptc_exec` + `tx.begin()` by default instead of sequential `edit_file` and `run_command` turns.
 
 Follow this 2-turn maximum protocol when refactoring symbols, signatures, or patterns across multiple files:
 

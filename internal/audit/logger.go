@@ -160,11 +160,16 @@ func PayloadKeyLengths(payloads map[string]string) map[string]int {
 }
 
 // DiscoverLogDirs returns candidate AgyPTC log directories ordered by priority.
+// When explicitDataDir is non-empty, only that directory is inspected so tests and isolated runs never mix with global logs.
 func DiscoverLogDirs(explicitDataDir string) []string {
-	var candidates []string
-	if explicitDataDir != "" {
-		candidates = append(candidates, filepath.Join(explicitDataDir, "logs"))
+	if strings.TrimSpace(explicitDataDir) != "" {
+		dir := filepath.Join(explicitDataDir, "logs")
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return []string{dir}
+		}
+		return nil
 	}
+	var candidates []string
 	h := homeDir()
 	if h != "" {
 		candidates = append(candidates,

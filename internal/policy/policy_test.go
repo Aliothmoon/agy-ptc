@@ -12,7 +12,7 @@ func TestPolicyWorkspaceConfinementAndGitGuard(t *testing.T) {
 	outside := t.TempDir()
 
 	eng := NewEngine(ws)
-	eng.LoadSettingsJSON([]byte(`{}`))
+	eng.LoadSettingsJSON([]byte(`{"allowNonWorkspaceAccess": false}`))
 
 	// Inside workspace write is allowed
 	inFile, err := eng.ResolveAndCheckWrite(ws, "internal/app.go")
@@ -40,7 +40,7 @@ func TestPolicyWorkspaceConfinementAndGitGuard(t *testing.T) {
 func TestPolicySettingsPrecedenceAndDestructiveCommands(t *testing.T) {
 	ws := t.TempDir()
 	eng := NewEngine(ws)
-	eng.LoadSettingsJSON([]byte(`{}`))
+	eng.LoadSettingsJSON([]byte(`{"allowNonWorkspaceAccess": false}`))
 	eng.LoadSettingsJSON([]byte(`{
 		"permissions": {
 			"allow": ["command(git)", "mcp(zvec_grep/*)"],

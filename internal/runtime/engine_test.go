@@ -319,3 +319,66 @@ func TestAuditLoggingErrorSerializationAliasesAndNonGitStatus(t *testing.T) {
 		t.Fatalf("unexpected audit reports:\nSTATS:\n%s\nLOGS:\n%s\nDETAIL:\n%s", statsText, logsText, detailText)
 	}
 }
+
+func TestPluginInstallDirNeverUsedAsSilentFallbackCwd(t *testing.T) {
+	realWs := t.TempDir()
+	_ = os.WriteFile(filepath.Join(realWs, "go.mod"), []byte("module example.com/realws\n"), 0o644)
+
+	fakePluginRoot := filepath.Join(t.TempDir(), ".gemini", "config", "plugins", "agy-ptc")
+	_ = os.MkdirAll(fakePluginRoot, 0o755)
+	dataDir := t.TempDir()
+
+	// Write active-workspace.json hint just like SessionStart hook does!
+	hintJSON := `{"cwd":` + mustJSONString(realWs) + `}`
+	_ = os.WriteFile(filepath.Join(dataDir, "active-workspace.json"), []byte(hintJSON), 0o600)
+
+	eng := NewEngine(dataDir, fakePluginRoot)
+	defer eng.Close()
+
+	// Omit `cwd` completely -> relative path `fs.read("go.mod")` MUST resolve against `realWs`, NOT `fakePluginRoot`!
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Code: `return await fs.read("go.mod");`,
+	})
+	if isErr || !strings.Contains(out, "example.com/realws") {
+		t.Fatalf("expected relative path without cwd to resolve against active-workspace.json (%s), got isErr=%v: %s", realWs, isErr, out)
+	}
+}
+
+func TestExternalNonWorkspacePathsSupportedAcrossAllCapabilities(t *testing.T) {
+	ws := t.TempDir()
+	extRepo := t.TempDir()
+	extGo := filepath.Join(extRepo, "ext.go")
+	_ = os.WriteFile(extGo, []byte("package ext\n\nfunc Hello() string { return \"old\" }\n"), 0o644)
+
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Payloads: map[string]string{
+			"extDir":  filepath.ToSlash(extRepo),
+			"extFile": filepath.ToSlash(extGo),
+		},
+		Code: `
+			const [hits, outline, gs] = await Promise.all([
+				search.rg("Hello", { path: P.extDir }),
+				ast.outline(P.extFile),
+				git.status(P.extDir),
+			]);
+			await edit.replace(P.extFile, '"old"', '"external_updated"');
+			const updated = await fs.read(P.extFile);
+			return { hitsCount: hits.length, sym: outline.symbols[0].name, isRepo: gs.isRepo, hasUpdated: updated.includes("external_updated") };
+		`,
+	})
+	if isErr {
+		t.Fatalf("expected external path operations to succeed, got: %s", out)
+	}
+	if !strings.Contains(out, `"hasUpdated": true`) || !strings.Contains(out, `"sym": "Hello"`) {
+		t.Fatalf("unexpected external path output: %s", out)
+	}
+}
+
+func mustJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}

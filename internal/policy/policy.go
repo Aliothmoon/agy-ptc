@@ -42,7 +42,7 @@ func IsApprovalRequired(err error) bool {
 }
 
 type cliSettings struct {
-	AllowNonWorkspaceAccess bool `json:"allowNonWorkspaceAccess"`
+	AllowNonWorkspaceAccess *bool `json:"allowNonWorkspaceAccess"`
 	Permissions             struct {
 		Allow []string `json:"allow"`
 		Ask   []string `json:"ask"`
@@ -69,7 +69,10 @@ type Engine struct {
 
 // NewEngine creates a policy engine rooted at workspaceDir and aligned with ~/.gemini/antigravity-cli/settings.json.
 func NewEngine(workspaceDir string, extraRoots ...string) *Engine {
-	e := &Engine{}
+	e := &Engine{
+		// Default to allowing external non-sensitive paths unless explicitly disabled via settings.json (`"allowNonWorkspaceAccess": false`) or `AGY_PTC_STRICT_WORKSPACE=1`.
+		allowNonWorkspaceAccess: os.Getenv("AGY_PTC_STRICT_WORKSPACE") != "1",
+	}
 	seen := map[string]bool{}
 	addRoot := func(p string) {
 		p = strings.TrimSpace(p)
@@ -118,7 +121,9 @@ func (e *Engine) LoadSettingsJSON(raw []byte) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return
 	}
-	e.allowNonWorkspaceAccess = cfg.AllowNonWorkspaceAccess
+	if cfg.AllowNonWorkspaceAccess != nil {
+		e.allowNonWorkspaceAccess = *cfg.AllowNonWorkspaceAccess
+	}
 	e.denyRules = parseRuleList(cfg.Permissions.Deny)
 	e.askRules = parseRuleList(cfg.Permissions.Ask)
 	e.allowRules = parseRuleList(cfg.Permissions.Allow)
@@ -173,12 +178,12 @@ func (e *Engine) ResolveAndCheckWrite(baseDir, targetPath string) (string, error
 	if err != nil {
 		return "", err
 	}
-	if e.isSensitivePath(realPath) || isProtectedGitInternal(realPath) {
+	if e.isSensitivePath(realPath) || isProtectedGitInternal(realPath) || isProtectedSystemRoot(realPath) {
 		return "", &PolicyError{
 			Decision: DecisionDeny,
 			Action:   "write_file",
 			Target:   targetPath,
-			Reason:   "writing to protected .git internals or credential paths is blocked",
+			Reason:   "writing to protected system directories, .git internals, or credential paths is blocked",
 		}
 	}
 	// Deny read implies deny write.
@@ -381,6 +386,16 @@ func isProtectedGitInternal(realPath string) bool {
 	norm := "/" + strings.Trim(normalizeRulePath(realPath), "/") + "/"
 	if strings.Contains(norm, "/.git/hooks/") || strings.HasSuffix(norm, "/.git/config/") || strings.Contains(norm, "/.git/objects/") {
 		return true
+	}
+	return false
+}
+
+func isProtectedSystemRoot(realPath string) bool {
+	norm := strings.TrimSuffix(normalizeRulePath(realPath), "/")
+	for _, sys := range []string{"/windows", "/program files", "/program files (x86)", "/etc", "/usr", "/bin", "/sbin", "/boot", "/system"} {
+		if norm == sys || strings.HasPrefix(norm, sys+"/") {
+			return true
+		}
 	}
 	return false
 }

@@ -1,18 +1,25 @@
 ---
 name: ptc-exec
 description: >-
-  Detailed API reference, error recovery playbook, and external MCP bridging guide
-  for mcp_agy-ptc_ptc_exec TypeScript programs. Load when composing advanced transactions,
-  cross-turn state paging, or external MCP calls, or after a PTC runtime error.
+  [DEFAULT RECOMMENDED: Prefer PTC Code Mode via mcp_agy-ptc_ptc_exec] Default to
+  using PTC Mode (`mcp_agy-ptc_ptc_exec`) instead of sequential `run_command` or
+  split `edit_file` calls whenever performing codebase search, AST symbol analysis,
+  multi-step file reads/edits, build/test checks, or external MCP orchestration.
+  Provides the TypeScript sandbox API reference, transactional patterns, and error recovery guide.
 ---
 
-# `mcp_agy-ptc_ptc_exec` — Advanced Reference & Troubleshooting
+# `mcp_agy-ptc_ptc_exec` — Default PTC Code Mode Guide & API Reference
+
+> [!IMPORTANT]
+> **Default Recommendation — Always Prefer PTC Mode (`mcp_agy-ptc_ptc_exec`)**:
+> By default, collapse multi-step exploration (`search.rg` / `search.glob` / `ast.outlines` / `fs.read`), data-dependent filtering, multi-hunk/multi-file edits (`edit.apply` / `tx.begin`), and concurrent verification (`sh.checks` / `tx.verify`) into **one `mcp_agy-ptc_ptc_exec` TypeScript program** rather than issuing serial shell or single-hunk edit turns. For pure single-tool Code Mode sessions, recommend `agy --agent ptc` (or `/agents` -> `ptc`).
 
 ## 1. Execution Model
 
 - `code` is compiled with `esbuild` (`TypeScript -> ES2020`) before any host operation runs. Syntax errors or missing `P.<key>` references fail preflight with **0 side effects** and exact 1-based line numbers.
 - Top-level `await` and `return` work directly. Do **not** wrap `code` in `async function main() {}`.
 - `import type { ... } from "..."` is stripped safely; runtime `import`/`require` are disabled for sandbox isolation. Use host capabilities (`fs`, `search`, `ast`, `edit`, `tx`, `git`, `sh`, `state`, `tools`, `mcp`).
+- Read-only `git.*` probes and `sh.exec` (`settle: true` by default) return structured `{ ok: false, ... }` / diagnostic strings instead of crashing `Promise.all`.
 
 ## 2. Transactional Refactoring (`tx`)
 
