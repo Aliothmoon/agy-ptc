@@ -109,7 +109,7 @@ Allow `mcp(agy-ptc_ptc/exec)` so PTC runs without repetitive approval prompts, a
 
 ## Sandbox TypeScript API Reference
 
-`code` is compiled as the body of an `async` TypeScript function (`top-level await` and `return` work directly; `import type` is stripped cleanly). Always pass the active project root in `cwd`.
+`code` is compiled as the body of an `async` TypeScript function (`top-level await` and `return` work directly; `import type` is stripped cleanly). Standard zero-I/O utilities (`Buffer`, `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path`, `crypto`, `URL`/`URLSearchParams`) are available globally out of the box. Always pass the active project root in `cwd`.
 
 ### Payloads (`P` / `payloads`)
 Pass multiline replacement blocks or templates via top-level `payloads: { afterCode: "..." }` and read them via `P.afterCode` inside `code`—avoiding nested JSON escaping errors. Missing `P.<key>` references fail preflight **before** any host operation executes.

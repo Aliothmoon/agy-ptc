@@ -15,10 +15,12 @@ import (
 const wrapperPrefixLines = 2
 
 var (
-	importTypeLineRegex = regexp.MustCompile(`^\s*import\s+type\s+[^;]+;?\s*$`)
-	payloadDotRegex     = regexp.MustCompile(`\b(?:P|payloads)\.([A-Za-z_$][A-Za-z0-9_$]*)\b`)
-	payloadBracketRegex = regexp.MustCompile(`\b(?:P|payloads)\[\s*["']([^"']+)["']\s*\]`)
-	jsStackLocRegex     = regexp.MustCompile(`user_program\.ts:(\d+):(\d+)`)
+	importTypeLineRegex    = regexp.MustCompile(`^\s*import\s+type\s+[^;]+;?\s*$`)
+	importDefaultShimRegex = regexp.MustCompile(`^\s*import\s+(?:\*\s+as\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+["'](?:node:)?(buffer|path|crypto|url|fs(?:/promises)?)["']\s*;?\s*$`)
+	importNamedShimRegex   = regexp.MustCompile(`^\s*import\s*\{([^}]+)\}\s*from\s+["'](?:node:)?(buffer|path|crypto|url|fs(?:/promises)?)["']\s*;?\s*$`)
+	payloadDotRegex        = regexp.MustCompile(`\b(?:P|payloads)\.([A-Za-z_$][A-Za-z0-9_$]*)\b`)
+	payloadBracketRegex    = regexp.MustCompile(`\b(?:P|payloads)\[\s*["']([^"']+)["']\s*\]`)
+	jsStackLocRegex        = regexp.MustCompile(`user_program\.ts:(\d+):(\d+)`)
 )
 
 // CompileResult holds the transpiled JavaScript and source mapping metadata.
@@ -54,11 +56,13 @@ func Compile(code string, payloads map[string]string) (*CompileResult, error) {
 		return nil, err
 	}
 
-	// Preserve exact 1-to-1 line numbering by replacing single-line `import type ...` with comments.
+	// Preserve exact 1-to-1 line numbering by rewriting single-line `import type` and sandbox builtin imports in-place.
 	sanitizedLines := make([]string, len(srcLines))
 	for i, line := range srcLines {
 		if importTypeLineRegex.MatchString(line) {
 			sanitizedLines[i] = "// [type import stripped]"
+		} else if rewritten, ok := rewriteBuiltinImportLine(line); ok {
+			sanitizedLines[i] = rewritten
 		} else {
 			sanitizedLines[i] = line
 		}
@@ -113,6 +117,72 @@ func Compile(code string, payloads map[string]string) (*CompileResult, error) {
 		SourceMap:  res.Map,
 		SourceLine: srcLines,
 	}, nil
+}
+
+func rewriteBuiltinImportLine(line string) (string, bool) {
+	if m := importDefaultShimRegex.FindStringSubmatch(line); m != nil {
+		ident := m[1]
+		mod := m[2]
+		switch mod {
+		case "buffer":
+			if ident == "Buffer" {
+				return "// [builtin Buffer active]", true
+			}
+			return fmt.Sprintf("const %s = { Buffer: (globalThis as any).Buffer };", ident), true
+		case "url":
+			return fmt.Sprintf("const %s = { URL: (globalThis as any).URL, URLSearchParams: (globalThis as any).URLSearchParams };", ident), true
+		case "fs", "fs/promises":
+			if ident == "fs" {
+				return "// [sandbox fs active]", true
+			}
+			return fmt.Sprintf("const %s = (globalThis as any).fs;", ident), true
+		default:
+			if ident == mod {
+				return fmt.Sprintf("// [builtin %s active]", mod), true
+			}
+			return fmt.Sprintf("const %s = (globalThis as any).%s;", ident, mod), true
+		}
+	}
+	if m := importNamedShimRegex.FindStringSubmatch(line); m != nil {
+		specList := strings.TrimSpace(m[1])
+		mod := m[2]
+		var rewrittenSpecs []string
+		for _, part := range strings.Split(specList, ",") {
+			p := strings.TrimSpace(part)
+			if p == "" || strings.HasPrefix(p, "type ") {
+				continue
+			}
+			if idx := strings.Index(p, " as "); idx > 0 {
+				orig := strings.TrimSpace(p[:idx])
+				alias := strings.TrimSpace(p[idx+4:])
+				rewrittenSpecs = append(rewrittenSpecs, orig+": "+alias)
+			} else {
+				rewrittenSpecs = append(rewrittenSpecs, p)
+			}
+		}
+		if len(rewrittenSpecs) == 0 {
+			return "// [type import stripped]", true
+		}
+		joined := strings.Join(rewrittenSpecs, ", ")
+		switch mod {
+		case "buffer", "url":
+			var filtered []string
+			for _, rs := range rewrittenSpecs {
+				if rs != "Buffer" && rs != "URL" && rs != "URLSearchParams" {
+					filtered = append(filtered, rs)
+				}
+			}
+			if len(filtered) == 0 {
+				return fmt.Sprintf("// [builtin %s globals active]", mod), true
+			}
+			return fmt.Sprintf("const { %s } = globalThis as any;", strings.Join(filtered, ", ")), true
+		case "fs", "fs/promises":
+			return fmt.Sprintf("const { %s } = (globalThis as any).fs;", joined), true
+		default:
+			return fmt.Sprintf("const { %s } = (globalThis as any).%s;", joined, mod), true
+		}
+	}
+	return "", false
 }
 
 func checkPayloadKeys(code string, payloads map[string]string) error {

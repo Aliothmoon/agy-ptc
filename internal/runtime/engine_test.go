@@ -474,3 +474,71 @@ func TestSandboxShellLargeJSONOutputMaxOutputOverrideAndUTF8Search(t *testing.T)
 		t.Fatalf("expected MaxOutputBytes=24000 to return full 15KB string inline, got len=%d: %s", len(outLarge), outLarge[:min(200, len(outLarge))])
 	}
 }
+
+func TestStandardNodeAndWebGlobalsBufferCryptoPathTextCodec(t *testing.T) {
+	ws := t.TempDir()
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			import { Buffer } from "node:buffer";
+			import { join, basename } from "node:path";
+
+			const py = "print('hello 中文 🚀')";
+			const b64 = Buffer.from(py, "utf8").toString("base64");
+			const roundTrip = Buffer.from(b64, "base64").toString("utf8");
+
+			// UTF-16LE base64 (used for PowerShell -EncodedCommand)
+			const psB64 = Buffer.from("Write-Output 42", "utf16le").toString("base64");
+			const psBack = Buffer.from(psB64, "base64").toString("utf16le");
+
+			// Hex, concat, alloc, byteLength, TextEncoder/TextDecoder, btoa/atob, crypto, path, URL
+			const hex = Buffer.concat([Buffer.from("ab"), Buffer.from("cd")]).toString("hex");
+			const u8 = new TextEncoder().encode("沙箱");
+			const dec = new TextDecoder().decode(u8);
+			const sha = crypto.createHash("sha256").update("agy-ptc").digest("hex");
+			const uuid = crypto.randomUUID();
+			const joined = path.posix.join("/repo/dir", "../src", "index.ts");
+			const u = new URL("https://example.com/api?q=hello+world");
+			u.searchParams.set("page", "2");
+
+			return {
+				roundTripOk: roundTrip === py,
+				psBackOk: psBack === "Write-Output 42",
+				hex,
+				byteLen: Buffer.byteLength("中文", "utf8"),
+				isBuf: Buffer.isBuffer(Buffer.alloc(4)),
+				btoaOk: atob(btoa("hello-ascii")) === "hello-ascii",
+				decOk: dec === "沙箱",
+				shaLen: sha.length,
+				uuidValid: /^[0-9a-f-]{36}$/.test(uuid),
+				joined,
+				base: basename(joined, ".ts"),
+				finalUrl: u.toString(),
+			};
+		`,
+	})
+	if isErr {
+		t.Fatalf("expected Buffer/crypto/path/URL/TextEncoder globals to succeed, got: %s", out)
+	}
+	for _, want := range []string{
+		`"roundTripOk": true`,
+		`"psBackOk": true`,
+		`"hex": "61626364"`,
+		`"byteLen": 6`,
+		`"isBuf": true`,
+		`"btoaOk": true`,
+		`"decOk": true`,
+		`"shaLen": 64`,
+		`"uuidValid": true`,
+		`"joined": "/repo/src/index.ts"`,
+		`"base": "index"`,
+		`"finalUrl": "https://example.com/api?q=hello+world&page=2"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing expected assertion %s in output:\n%s", want, out)
+		}
+	}
+}

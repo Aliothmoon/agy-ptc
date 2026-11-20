@@ -3,6 +3,7 @@
 package output
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -357,6 +358,7 @@ func MarshalResultCompact(val any) string {
 
 // MarshalResultForBudget serializes val as indented JSON if it fits within budgetBytes (and <= 6000 B),
 // otherwise compacts whitespace first so medium-sized payloads fit inline without truncation.
+// Uses SetEscapeHTML(false) so `<`, `>`, and `&` in code/URLs stay literal 1-byte characters instead of `\u003c`/`\u0026`.
 func MarshalResultForBudget(val any, budgetBytes int) string {
 	if val == nil {
 		return "null"
@@ -364,17 +366,30 @@ func MarshalResultForBudget(val any, budgetBytes int) string {
 	if s, ok := val.(string); ok {
 		return s
 	}
-	compact, cErr := json.Marshal(val)
+	compact, cErr := marshalNoEscapeHTML(val, false)
 	if cErr != nil {
 		return fmt.Sprintf("%v", val)
 	}
 	// Only pretty-print if compact JSON is small enough that indentation won't push it over budgetBytes.
 	if len(compact) <= 4800 && (budgetBytes <= 0 || len(compact)*4/3 <= budgetBytes) {
-		if pretty, pErr := json.MarshalIndent(val, "", "  "); pErr == nil && (budgetBytes <= 0 || len(pretty) <= budgetBytes) {
-			return string(pretty)
+		if pretty, pErr := marshalNoEscapeHTML(val, true); pErr == nil && (budgetBytes <= 0 || len(pretty) <= budgetBytes) {
+			return pretty
 		}
 	}
-	return string(compact)
+	return compact
+}
+
+func marshalNoEscapeHTML(val any, indent bool) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if indent {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(val); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
 func isNoiseLine(line string) bool {

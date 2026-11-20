@@ -109,7 +109,7 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 
 ## 沙箱 TypeScript API 速查
 
-`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。调用时请始终传入当前工作区根目录 `cwd`。
+`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。沙箱内已内置常用标准全局工具（`Buffer`、`btoa`/`atob`、`TextEncoder`/`TextDecoder`、`path`、`crypto`、`URL`/`URLSearchParams`），无需额外 `import`。调用时请始终传入当前工作区根目录 `cwd`。
 
 ### 多行代码块传参（`P` / `payloads`）
 将多行替换代码或模板放在顶层参数 `payloads: { newCode: "..." }` 中，在 `code` 内通过 `P.newCode` 读取，彻底避免多层 JSON 转义报错；若引用了不存在的 `P.<key>`，编译预检会在**零副作用**前提下直接精准报错。

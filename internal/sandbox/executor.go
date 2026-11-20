@@ -466,6 +466,9 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 	if err := installConsoleAndTimers(env); err != nil {
 		return nil, err
 	}
+	if err := installStandardGlobals(env); err != nil {
+		return nil, err
+	}
 
 	for _, b := range binders {
 		if err := b.Bind(env); err != nil {

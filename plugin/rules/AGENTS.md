@@ -32,6 +32,7 @@ Use **`mcp_agy-ptc_ptc_exec`** (eagerly loaded native tool) to collapse multi-st
   - `await git.status(repoDir?)` -> `{ isRepo, branch, clean, staged, modified, untracked }` · `await git.diff(argsOrOpts?)` · `await git.log(argsOrOpts?)` · `await git.blame(path, { cwd?, startLine?, endLine? })`
   - `await sh.exec(cmd, { cwd?, timeoutSec?, timeoutMs?, compact?: true })` -> `{ ok, exitCode, timedOut, output, durationMs }` (`settle: true`, default `15s` timeout + process-tree kill)
   - `await sh.checks(["go vet ./...", "go test ./pkg/..."], { concurrency?, timeoutSec?, compact?: true })` -> `{ ok, summary, results, failures? }`
+- **Standard Utility Globals**: `Buffer` (`utf8`/`base64`/`base64url`/`hex`/`utf16le`), `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path` (`join`/`resolve`/`dirname`/`basename`/`extname`), `crypto` (`randomUUID`/`createHash`), and `URL`/`URLSearchParams` are available globally without `import`.
 - **`state` & External `mcp` / `tools`**:
   - `state.set(key, val)` / `state.get(key)` / `state.keys()` — persists across turns; oversized `return` values auto-save to `state.get("__last_result")`.
   - `await tools.search("query")` -> `await tools.describe(ref)` -> `await mcp.<server>.<tool>(args)` (or `await mcp.call("server/tool", args)`).
