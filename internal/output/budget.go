@@ -263,7 +263,8 @@ func FormatCommandOutput(p CommandFormatParams) string {
 
 	if p.ExitCode == 0 {
 		if combined == "" {
-			return "OK"
+			// Never synthesize text: callers concatenate output (e.g. `echo $env:X`), and `ok` already signals success.
+			return ""
 		}
 		var nonEmpty []string
 		var summary []string

@@ -111,7 +111,7 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 
 ## 沙箱 TypeScript API 速查
 
-`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。沙箱内已内置常用标准全局工具（`Buffer`、`btoa`/`atob`、`TextEncoder`/`TextDecoder`、`path`、`crypto`、`URL`/`URLSearchParams`、`setTimeout`/`clearTimeout`、`structuredClone`），无需额外 `import`。调用时请始终传入当前工作区根目录 `cwd`。
+`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。沙箱内已内置常用标准全局工具（`Buffer`、`btoa`/`atob`、`TextEncoder`/`TextDecoder`、`path`、`crypto`、`URL`/`URLSearchParams`、`setTimeout`/`clearTimeout`、`structuredClone`、只读 `process` / `os`），无需额外 `import`。调用时请始终传入当前工作区根目录 `cwd`。
 
 ### 多行代码块传参（`P` / `payloads`）
 将多行替换代码或模板放在顶层参数 `payloads: { newCode: "..." }` 中，在 `code` 内通过 `P.newCode` 读取，彻底避免多层 JSON 转义报错；若引用了不存在的 `P.<key>`，编译预检会在**零副作用**前提下直接精准报错。
@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content)` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename`（`mv`）· `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })`
 - `search.glob(pattern, { path?, maxResults? })`（支持 `{a,b}` 花括号展开与容错回退）
 - **跨目录 / 外部路径支持**：相对路径始终基于 `cwd` 解析；在策略允许下（默认开启），所有模块均支持直接传入工作区外的绝对路径或 `../` 跨仓路径（如 `D:/OtherRepo/...`）。
@@ -183,7 +183,7 @@ const checks = await sh.checks(["go vet ./...", "go test ./internal/compiler/...
 const pkgs = await sh.run("go", ["list", "-json", "./..."], { env: { GOFLAGS: "-mod=mod" } });
 ```
 
-编辑辅助：hunk 的 `nth` 指定替换第 N 处匹配（类似 `sed s/x/y/N`）；`edit.apply({ ..., dryRun: true })` 返回 `.diff`，`await t.diff()` 返回事务的统一 diff（基于 `git diff --no-index`，需要 `PATH` 中有 `git`）。
+编辑辅助：hunk 的 `symbol: "Type::method"` 把匹配限定在某个函数内（`ast.read(path, symbol)` 返回其源码），`nth` 指定替换第 N 处匹配（类似 `sed s/x/y/N`）；`edit.apply({ ..., dryRun: true })` 返回 `.diff`，`await t.diff()` 返回事务的统一 diff（基于 `git diff --no-index`，需要 `PATH` 中有 `git`）。
 
 ### 跨回合状态（`state.*`）与外部 MCP 桥接（`tools.*`、`mcp.*`）
 ```ts
@@ -202,7 +202,7 @@ if (found.length > 0) {
 宿主操作失败会抛出 JS `Error`：`name` 为语义化类型，`message` 为单行 `"op: detail"`；未捕获时会指向出错的用户代码行（`at code:N  <源码>`）：
 
 ```text
-Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2, L6); set nth, startLine/endLine, or replaceAll: true
+Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2 in a, L6 in b); set symbol, nth, or replaceAll: true
   at code:4  await t.edit("src/lib.rs", hunks);
 ```
 

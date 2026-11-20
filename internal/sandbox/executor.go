@@ -573,6 +573,9 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (res
 	if err := installTimers(env); err != nil {
 		return nil, err
 	}
+	if err := installProcessOS(env); err != nil {
+		return nil, err
+	}
 
 	for _, b := range binders {
 		if err := b.Bind(env); err != nil {
@@ -865,7 +868,8 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 					return {
 						id,
 						edit: (pathOrSpec, hunks) => rawTx._edit(id, pathOrSpec, hunks),
-						write: (path, content) => rawTx._write(id, path, content),
+						write: (path, content, opts) => rawTx._write(id, path, content, opts || {}),
+						rm: (path) => rawTx._rm(id, path),
 						verify: (commands, opts) => rawTx._verify(id, commands, opts || {}),
 						commit: () => rawTx._commit(id),
 						rollback: () => rawTx._rollback(id),
@@ -877,7 +881,8 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 		}
 
 		const aliasMap = {
-			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list", readMany: "cat", readFiles: "cat" },
+			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list", readMany: "cat", readFiles: "cat",
+				mv: "rename", move: "rename", copy: "cp", copyFile: "cp", unlink: "rm", remove: "rm", mkdirp: "mkdir" },
 			search: { grep: "rg", find: "glob", files: "glob" },
 			ast: { symbols: "outline", parse: "outline" },
 			edit: { edit: "apply", patch: "apply" },

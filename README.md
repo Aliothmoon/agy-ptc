@@ -111,7 +111,7 @@ Allow `mcp(agy-ptc_vm/exec)` so PTC runs without repetitive approval prompts, an
 
 ## Sandbox TypeScript API Reference
 
-`code` is compiled as the body of an `async` TypeScript function (`top-level await` and `return` work directly; `import type` is stripped cleanly). Standard zero-I/O utilities (`Buffer`, `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path`, `crypto`, `URL`/`URLSearchParams`, `setTimeout`/`clearTimeout`, `structuredClone`) are available globally out of the box. Always pass the active project root in `cwd`.
+`code` is compiled as the body of an `async` TypeScript function (`top-level await` and `return` work directly; `import type` is stripped cleanly). Standard zero-I/O utilities (`Buffer`, `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path`, `crypto`, `URL`/`URLSearchParams`, `setTimeout`/`clearTimeout`, `structuredClone`, read-only `process` / `os`) are available globally out of the box. Always pass the active project root in `cwd`.
 
 ### Payloads (`P` / `payloads`)
 Pass multiline replacement blocks or templates via top-level `payloads: { afterCode: "..." }` and read them via `P.afterCode` inside `code`—avoiding nested JSON escaping errors. Missing `P.<key>` references fail preflight **before** any host operation executes.
@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content)` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })`
 - `search.glob(pattern, { path?, maxResults? })` (supports `{a,b}` braces + automatic fallback recovery)
 - **External Paths**: Relative paths resolve against `cwd`; external non-sensitive paths (`D:/OtherRepo/...`, `../shared/...`) are also supported across all capabilities unless disabled by policy.
@@ -183,7 +183,7 @@ const checks = await sh.checks(["go vet ./...", "go test ./internal/compiler/...
 const pkgs = await sh.run("go", ["list", "-json", "./..."], { env: { GOFLAGS: "-mod=mod" } });
 ```
 
-Edit helpers: hunk `nth` picks the Nth match (like `sed s/x/y/N`); `edit.apply({ ..., dryRun: true })` returns `.diff` and `await t.diff()` returns the tx's unified diff (via `git diff --no-index`, so `git` must be on `PATH`).
+Edit helpers: hunk `symbol: "Type::method"` limits matching to one function (`ast.read(path, symbol)` returns its text), hunk `nth` picks the Nth match (like `sed s/x/y/N`); `edit.apply({ ..., dryRun: true })` returns `.diff` and `await t.diff()` returns the tx's unified diff (via `git diff --no-index`, so `git` must be on `PATH`).
 
 ### Cross-Turn Session State (`state.*`) & External MCP Bridge (`tools.*`, `mcp.*`)
 ```ts
@@ -202,7 +202,7 @@ if (found.length > 0) {
 Host failures throw a JS `Error` with a semantic `name` and a one-line `message` (`"op: detail"`); uncaught ones point at your line (`at code:N  <source>`):
 
 ```text
-Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2, L6); set nth, startLine/endLine, or replaceAll: true
+Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2 in a, L6 in b); set symbol, nth, or replaceAll: true
   at code:4  await t.edit("src/lib.rs", hunks);
 ```
 

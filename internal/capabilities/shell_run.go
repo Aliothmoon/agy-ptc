@@ -127,11 +127,7 @@ func (b *ShellGitBinder) RunArgv(parentCtx context.Context, env *sandbox.Executi
 	cmd.Dir = cwd
 	setSysProcAttrHide(cmd)
 	if extra, ok := opts["env"].(map[string]any); ok && len(extra) > 0 {
-		vars := os.Environ()
-		for k, v := range extra {
-			vars = append(vars, k+"="+fmt.Sprint(v))
-		}
-		cmd.Env = vars
+		cmd.Env = mergeEnv(extra)
 	}
 	if in, ok := opts["stdin"].(string); ok {
 		cmd.Stdin = strings.NewReader(in)
@@ -193,4 +189,100 @@ func (b *ShellGitBinder) RunArgv(parentCtx context.Context, env *sandbox.Executi
 func cleanStream(s string) string {
 	s = output.StripAnsi(strings.ReplaceAll(s, "\r\n", "\n"))
 	return strings.TrimRight(s, "\n")
+}
+
+// mergeEnv overlays extra variables on the current environment. A value of null removes the variable.
+// On Windows names are case-insensitive, so an override replaces e.g. "Path" when "PATH" is given.
+func mergeEnv(extra map[string]any) []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base)+len(extra))
+	norm := func(k string) string {
+		if runtime.GOOS == "windows" {
+			return strings.ToUpper(k)
+		}
+		return k
+	}
+	override := map[string]bool{}
+	for k := range extra {
+		override[norm(k)] = true
+	}
+	for _, kv := range base {
+		if k, _, ok := strings.Cut(kv, "="); ok && k != "" && override[norm(k)] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	for k, v := range extra {
+		if v == nil {
+			continue
+		}
+		out = append(out, k+"="+fmt.Sprint(v))
+	}
+	return out
+}
+
+// defaultShellName is the dialect sh.exec uses when no `shell` option is given.
+func defaultShellName() string {
+	if runtime.GOOS != "windows" {
+		return "sh"
+	}
+	if _, err := exec.LookPath("pwsh"); err == nil {
+		return "pwsh"
+	}
+	return "cmd"
+}
+
+// resolveShell maps a shell name to its executable and the args preceding the command line.
+func resolveShell(name string) (string, []string, error) {
+	if name == "" {
+		name = defaultShellName()
+	}
+	switch strings.ToLower(name) {
+	case "pwsh":
+		p, err := exec.LookPath("pwsh")
+		if err != nil {
+			return "", nil, sandbox.NewHostError(sandbox.KindNotFound, nil, "pwsh: command not found")
+		}
+		return p, []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command"}, nil
+	case "powershell":
+		p, err := exec.LookPath("powershell")
+		if err != nil {
+			return "", nil, sandbox.NewHostError(sandbox.KindNotFound, nil, "powershell: command not found")
+		}
+		return p, []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command"}, nil
+	case "cmd":
+		if runtime.GOOS != "windows" {
+			return "", nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "cmd is only available on Windows")
+		}
+		return "cmd.exe", []string{"/d", "/s", "/c"}, nil
+	case "bash", "sh":
+		p, err := findPosixShell(strings.ToLower(name))
+		if err != nil {
+			return "", nil, err
+		}
+		return p, []string{"-c"}, nil
+	}
+	return "", nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "unknown shell %q (use pwsh, powershell, cmd, bash or sh)", name)
+}
+
+// findPosixShell prefers Git for Windows' bash/sh over the WSL launcher in System32 (which runs inside Linux).
+func findPosixShell(name string) (string, error) {
+	if runtime.GOOS != "windows" {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
+		return "", sandbox.NewHostError(sandbox.KindNotFound, nil, "%s: command not found", name)
+	}
+	if gitPath, err := exec.LookPath("git"); err == nil {
+		root := filepath.Dir(filepath.Dir(gitPath)) // <Git>/cmd/git.exe or <Git>/bin/git.exe
+		for _, c := range []string{filepath.Join(root, "bin", name+".exe"), filepath.Join(root, "usr", "bin", name+".exe")} {
+			if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+				return c, nil
+			}
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil && !strings.Contains(strings.ToLower(p), `\system32\`) {
+		return p, nil
+	}
+	return "", sandbox.NewHostError(sandbox.KindNotFound, nil, "%s: not found (install Git for Windows)", name)
 }

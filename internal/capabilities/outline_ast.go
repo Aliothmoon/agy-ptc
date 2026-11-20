@@ -7,7 +7,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -79,6 +78,54 @@ func (b *ASTBinder) Bind(env *sandbox.ExecutionEnv) error {
 			}
 			return results, nil
 		},
+		// ast.read(path, "Type::method" | "Type.method" | "name", { lineNumbers? }) -> { kind, name, startLine, endLine, text }
+		"read": func(_ context.Context, args []any) (any, error) {
+			targetPath, err := requireStringArg(args, 0, "path")
+			if err != nil {
+				return nil, err
+			}
+			query := ""
+			if len(args) > 1 {
+				query, _ = args[1].(string)
+			}
+			if strings.TrimSpace(query) == "" {
+				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "pass (path, symbol)")
+			}
+			var opts map[string]any
+			if len(args) > 2 {
+				opts, _ = args[2].(map[string]any)
+			}
+			absPath, err := b.Policy.ResolveAndCheckRead(env.Cwd, targetPath)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := os.ReadFile(absPath)
+			if err != nil {
+				return nil, err
+			}
+			syms, lines := outlineFromSource(absPath, raw)
+			rel := relDisplayPath(env.Cwd, absPath)
+			s, err := resolveSymbol(syms, query, rel)
+			if err != nil {
+				return nil, err
+			}
+			end := minInt(s.EndLine, len(lines))
+			body := lines[s.StartLine-1 : end]
+			if optBool(opts, "lineNumbers", false) {
+				numbered := make([]string, len(body))
+				for i, l := range body {
+					numbered[i] = fmt.Sprintf("%d: %s", s.StartLine+i, l)
+				}
+				body = numbered
+			}
+			return map[string]any{
+				"kind":      s.Kind,
+				"name":      qualifiedName(syms, s, symbolSep(rel)),
+				"startLine": s.StartLine,
+				"endLine":   end,
+				"text":      strings.Join(body, "\n"),
+			}, nil
+		},
 		"enclosingSymbol": func(_ context.Context, args []any) (any, error) {
 			targetPath, err := requireStringArg(args, 0, "path")
 			if err != nil {
@@ -121,18 +168,8 @@ func extractFileOutline(workspaceCwd, absPath string) (FileOutline, error) {
 	if err != nil {
 		return FileOutline{}, err
 	}
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	lines := strings.Split(text, "\n")
-	rel := relDisplayPath(workspaceCwd, absPath)
-	ext := strings.ToLower(filepath.Ext(absPath))
-
-	if ext == ".go" {
-		if syms, ok := extractGoASTSymbols(absPath, raw, lines); ok {
-			return FileOutline{File: rel, TotalLines: len(lines), Symbols: syms}, nil
-		}
-	}
-	syms := extractGenericSymbols(ext, lines)
-	return FileOutline{File: rel, TotalLines: len(lines), Symbols: syms}, nil
+	syms, lines := outlineFromSource(absPath, raw)
+	return FileOutline{File: relDisplayPath(workspaceCwd, absPath), TotalLines: len(lines), Symbols: syms}, nil
 }
 
 // extractGoASTSymbols uses Go's standard `go/parser` for 100% exact AST line ranges on Go files.
@@ -215,11 +252,12 @@ func formatExprType(e ast.Expr) string {
 }
 
 var (
-	tsSymRegex   = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:async\s+)?(function|class|interface|type|enum|const)\s+([A-Za-z_$][A-Za-z0-9_$]*)`)
-	pySymRegex   = regexp.MustCompile(`^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)`)
-	rustSymRegex = regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|impl|mod)\s+([A-Za-z_][A-Za-z0-9_<:>']*)`)
-	javaSymRegex = regexp.MustCompile(`^\s*(?:public|private|protected|internal|static|final|abstract|sealed|\s)*(class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)`)
-	mdHeadRegex  = regexp.MustCompile(`^(#{1,4})\s+(.+)$`)
+	tsSymRegex    = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:async\s+)?(function|class|interface|type|enum|const)\s+([A-Za-z_$][A-Za-z0-9_$]*)`)
+	pySymRegex    = regexp.MustCompile(`^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	rustSymRegex  = regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe|default|extern\s+"[^"]*")\s+)*(fn|struct|enum|trait|mod|union)\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	rustImplRegex = regexp.MustCompile(`^\s*(?:unsafe\s+)?impl(?:\s*<.*?>)?\s+(.+?)\s*(?:\{.*|\bwhere\b.*)?$`)
+	javaSymRegex  = regexp.MustCompile(`^\s*(?:public|private|protected|internal|static|final|abstract|sealed|\s)*(class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	mdHeadRegex   = regexp.MustCompile(`^(#{1,4})\s+(.+)$`)
 )
 
 func extractGenericSymbols(ext string, lines []string) []SymbolInfo {
@@ -241,6 +279,22 @@ func extractBraceSymbols(lines []string, declRe *regexp.Regexp) []SymbolInfo {
 	syms := []SymbolInfo{}
 	for i := 0; i < len(lines); i++ {
 		m := declRe.FindStringSubmatch(lines[i])
+		if len(m) < 3 && declRe == rustSymRegex {
+			if im := rustImplRegex.FindStringSubmatch(lines[i]); im != nil {
+				target := im[1]
+				if _, after, ok := strings.Cut(target, " for "); ok {
+					target = after
+				}
+				target = strings.TrimSpace(target)
+				if j := strings.IndexAny(target, "<( "); j > 0 {
+					target = target[:j]
+				}
+				if j := strings.LastIndex(target, "::"); j >= 0 {
+					target = target[j+2:]
+				}
+				m = []string{lines[i], "impl", target}
+			}
+		}
 		if len(m) < 3 {
 			continue
 		}

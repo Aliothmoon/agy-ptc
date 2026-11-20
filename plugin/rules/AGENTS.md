@@ -17,28 +17,30 @@ Use **`mcp_agy-ptc_vm_exec`** (eagerly loaded native tool) to collapse multi-ste
 - **Paths**: Always pass workspace root in `cwd`. Relative paths resolve against `cwd`; **external absolute paths or `../` cross-repo paths** (`D:/OtherRepo/...`, `~/...`) are also supported across `fs.*`, `search.*`, `ast.*`, `edit.*`, `tx.*`, `git.*` (`{ cwd }`), and `sh.*` (`{ cwd }`).
 - **Payloads (`P` / `payloads`)**: Put multiline replacement code or templates in top-level `payloads: { newFunc: "..." }` and reference `P.newFunc` inside `code` (avoids nested JSON string escaping).
 - **`search`**:
-  - `await search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })` -> `Array<{ file, line, column, text, match }>`
+  - `await search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })` -> `Array<{ file, line, column, text, match, before?, after? }>`
   - `await search.glob(pattern, { path?, maxResults? })` -> `string[]` (use `*` and `{a,b}`, not regex `|`)
 - **`ast`**:
   - `await ast.outline(path)` / `await ast.outlines(paths)` -> `{ file, totalLines, symbols: [{ kind, name, signature?, startLine, endLine }] }` (exact `go/parser` AST for Go; TS/JS/Py/Rust/Java/MD supported)
+  - `await ast.read(path, "Type::method")` -> `{ kind, name, startLine, endLine, text }` (also `Type.method`, bare `name`)
   - `await ast.enclosingSymbol(path, line)` -> `{ kind, name, startLine, endLine } | null`
 - **`fs`**:
   - `await fs.read(path, { startLine?, endLine?, lineNumbers? })` -> `string` (up to 2 MB inside sandbox memory)
   - `await fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel multi-read; unreadable -> `null` + Warning)
-  - `await fs.write(path, content)` · `await fs.exists(path)` · `await fs.stat(path)` · `await fs.list(path)` · `await fs.tree(path, depth?)`
+  - `await fs.write(path, content, { eol?: "lf" | "crlf" })` (default keeps the file's style; new `.bat`/`.cmd` -> CRLF) · `await fs.exists(path)` · `await fs.stat(path)` · `await fs.list(path)` · `await fs.tree(path, depth?)`
+  - `await fs.mkdir(path)` (-p) · `await fs.rm(path, { force? })` (file/empty dir) · `await fs.rename(from, to)` (`mv`) · `await fs.cp(from, to, { recursive? })` — immediate, not transactional
 - **`edit` & `tx` (Atomic Transactions)**:
-  - `await edit.apply({ edits: [{ path, hunks: [{ target, replacement, nth?, startLine?, endLine?, replaceAll? }], create?, overwrite? }], dryRun?, bestEffort?, verify? })` (`nth`: Nth match; `dryRun` -> `.diff`)
-  - `const t = await tx.begin(); await t.edit(path, hunks); await t.write(path, content); const v = await t.verify(["go vet ./...", "go test ./pkg/..."]); if (!v.ok) { await t.rollback(); return v.failures; } await t.commit();` (uncommitted `tx` auto-rolls back; `await t.diff()` -> unified diff)
+  - `await edit.apply({ edits: [{ path, hunks: [{ target, replacement, symbol?, nth?, startLine?, endLine?, replaceAll? }], create?, overwrite? }], dryRun?, bestEffort?, verify? })` (`symbol: "Type::method"` limits matching to that symbol; `nth`: Nth match; `dryRun` -> `.diff`)
+  - `const t = await tx.begin(); await t.edit(path, hunks); await t.write(path, content); const v = await t.verify(["go vet ./...", "go test ./pkg/..."]); if (!v.ok) { await t.rollback(); return v.failures; } await t.commit();` (uncommitted `tx` auto-rolls back; also `t.rm(path)`, `await t.diff()`; pass all files to one `t.edit([{ path, hunks }, ...])` so every hunk is validated before anything is written)
 - **`git` & `sh`**:
   - `await git.status(repoDir?)` -> `{ isRepo, branch, clean, staged, modified, untracked }` · `await git.diff(argsOrOpts?)` · `await git.log(argsOrOpts?)` · `await git.blame(path, { cwd?, startLine?, endLine? })`
-  - `await sh.exec(cmd, { cwd?, timeoutSec?, timeoutMs?, compact?: true })` -> `{ ok, exitCode, timedOut, output, durationMs }` (`settle: true`, default `15s` timeout + process-tree kill)
+  - `await sh.exec(cmd, { cwd?, env?, shell?: "pwsh" | "cmd" | "bash" | "sh", timeoutMs?, compact?: true })` -> `{ ok, exitCode, timedOut, output, durationMs }` (`settle: true`, default `15s` timeout + process-tree kill; `sh.shell` = default dialect)
   - `await sh.run(file, args?, { cwd?, env?, stdin?, timeoutMs? })` -> `{ ok, exitCode, timedOut, stdout, stderr, durationMs }` (no shell: no quoting issues; use for parseable output)
   - `await sh.checks(["go vet ./...", "go test ./pkg/..."], { concurrency?, timeoutSec?, compact?: true })` -> `{ ok, summary, results, failures? }`
-- **Standard Utility Globals**: `Buffer` (`utf8`/`base64`/`base64url`/`hex`/`utf16le`), `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path` (`join`/`resolve`/`dirname`/`basename`/`extname`), `crypto` (`randomUUID`/`createHash`), `URL`/`URLSearchParams`, `setTimeout`/`clearTimeout`, and `structuredClone` are available globally without `import`.
+- **Standard Utility Globals**: `Buffer` (`utf8`/`base64`/`base64url`/`hex`/`utf16le`), `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path` (`join`/`resolve`/`dirname`/`basename`/`extname`), `crypto` (`randomUUID`/`createHash`), `URL`/`URLSearchParams`, `setTimeout`/`clearTimeout`, `structuredClone`, read-only `process` (`platform`, `arch`, `env`, `cwd()`) and `os` (`homedir()`, `tmpdir()`, `EOL`) are available globally without `import`.
 - **`state` & External `mcp` / `tools`**:
   - `state.set(key, val)` / `state.get(key)` / `state.keys()` — persists across turns; oversized `return` values auto-save to `state.get("__last_result")`.
   - `await tools.search("query")` -> `await tools.describe(ref)` -> `await mcp.<server>.<tool>(args)` (or `await mcp.call("server/tool", args)`).
-- **Errors**: `e.name` is `NotFound` | `NoMatch` | `Ambiguous` | `NeedsApproval` | `Denied` | `Timeout` | `BadArgs` | `CmdFailed` | `Error`; `e.message` = `"op: detail"`; `e.data` holds details (e.g. `Ambiguous` -> `{ lines }`). Capped results (`search.rg`, `fs.list`, ...) are reported under `Warnings:`.
+- **Errors**: `e.name` is `NotFound` | `NoMatch` | `Ambiguous` | `NeedsApproval` | `Denied` | `Timeout` | `BadArgs` | `CmdFailed` | `Error`; `e.message` = `"op: detail"`; `e.data` holds details (e.g. `Ambiguous` -> `{ lines, symbols }`). Capped results (`search.rg`, `fs.list`, ...) are reported under `Warnings:`.
 
 ## Hygiene
 

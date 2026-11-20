@@ -191,11 +191,12 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			return out, nil
 		},
 		"write": func(_ context.Context, args []any) (any, error) {
-			var targetPath, content string
+			var targetPath, content, eol string
 			if len(args) >= 1 {
 				if m, ok := args[0].(map[string]any); ok {
 					targetPath = firstString(m, "path", "file", "file_path")
 					content = firstString(m, "content", "text", "contents", "body")
+					eol = firstString(m, "eol")
 				} else if s, ok := args[0].(string); ok {
 					targetPath = s
 					if len(args) >= 2 {
@@ -203,6 +204,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 							content = c
 						}
 					}
+					eol = firstString(optsAt(args, 2), "eol")
 				}
 			}
 			if targetPath == "" {
@@ -212,9 +214,10 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			data := []byte(content)
-			if orig, rErr := os.ReadFile(absPath); rErr == nil {
-				data = keepLineEndings(orig, data)
+			orig, rErr := os.ReadFile(absPath)
+			data, err := applyEOL(targetPath, orig, rErr == nil, []byte(content), eol)
+			if err != nil {
+				return nil, err
 			}
 			if err := writeFilePreserveMode(absPath, data); err != nil {
 				return nil, err
@@ -327,6 +330,9 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 		},
 	}
 
+	for name, fn := range b.fileOps(env) {
+		fsAsync[name] = fn
+	}
 	if err := env.SetNamespace("fs", fsAsync, nil); err != nil {
 		return err
 	}
@@ -382,6 +388,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 
 const (
 	maxCatFiles         = 200
+	maxContextLines     = 50
 	defaultRgMaxResults = 100
 	treeMaxItems        = 300
 )
@@ -435,9 +442,9 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 				q.caseSensitive = b
 			}
 		}
-		q.contextLines = optInt(opts, "contextLines", optInt(opts, "context", 0))
-		if q.contextLines > 5 {
-			q.contextLines = 5
+		q.contextLines = optInt(opts, "contextLines", optInt(opts, "context", optInt(opts, "C", 0)))
+		if q.contextLines > maxContextLines {
+			q.contextLines = maxContextLines
 		}
 		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", defaultRgMaxResults))
 		if q.maxResults <= 0 {
@@ -528,6 +535,15 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 	}
 
 	hits := []SearchHit{}
+	// Context lines arrive as separate "context" events (and adjacent matches double as context),
+	// so keep a rolling window for `before` and extend recent hits' `after` as later lines stream in.
+	type seenLine struct {
+		n    int
+		text string
+	}
+	var window []seenLine
+	fileStart := 0 // index in hits of the first hit of the current file
+	full := false
 	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -535,28 +551,60 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
 			continue
 		}
-		if ev.Type != "match" {
+		switch ev.Type {
+		case "begin":
+			if full {
+				return hits, nil
+			}
+			window = window[:0]
+			fileStart = len(hits)
+			continue
+		case "match", "context":
+		default:
 			continue
 		}
-		col := 1
-		sub := ""
-		if len(ev.Data.Submatches) > 0 {
-			col = ev.Data.Submatches[0].Start + 1
-			sub = ev.Data.Submatches[0].Match.Text
-		}
+		n := ev.Data.LineNumber
 		lineText := strings.TrimRight(ev.Data.Lines.Text, "\r\n")
 		if len(lineText) > MaxSearchLineBytes {
 			lineText = output.SliceUTF8Bytes(lineText, MaxSearchLineBytes) + "..."
 		}
-		hits = append(hits, SearchHit{
-			File:    relDisplayPath(workspaceCwd, ev.Data.Path.Text),
-			Line:    ev.Data.LineNumber,
-			Column:  col,
-			Text:    lineText,
-			Subtext: sub,
-		})
-		if len(hits) >= q.maxResults {
-			break
+		if q.contextLines > 0 {
+			for i := fileStart; i < len(hits); i++ {
+				if n > hits[i].Line && n <= hits[i].Line+q.contextLines {
+					hits[i].After = append(hits[i].After, lineText)
+				}
+			}
+		}
+		if ev.Type == "match" && !full {
+			col := 1
+			sub := ""
+			if len(ev.Data.Submatches) > 0 {
+				col = ev.Data.Submatches[0].Start + 1
+				sub = ev.Data.Submatches[0].Match.Text
+			}
+			hit := SearchHit{
+				File:    relDisplayPath(workspaceCwd, ev.Data.Path.Text),
+				Line:    n,
+				Column:  col,
+				Text:    lineText,
+				Subtext: sub,
+			}
+			for _, w := range window {
+				if w.n >= n-q.contextLines && w.n < n {
+					hit.Before = append(hit.Before, w.text)
+				}
+			}
+			hits = append(hits, hit)
+			full = len(hits) >= q.maxResults
+			if full && q.contextLines == 0 {
+				return hits, nil
+			}
+		}
+		if q.contextLines > 0 {
+			window = append(window, seenLine{n, lineText})
+			if len(window) > q.contextLines {
+				window = window[1:]
+			}
 		}
 	}
 	return hits, nil

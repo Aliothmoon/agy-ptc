@@ -21,7 +21,8 @@ type EditHunk struct {
 	StartLine   int    `json:"startLine,omitempty"`
 	EndLine     int    `json:"endLine,omitempty"`
 	ReplaceAll  bool   `json:"replaceAll,omitempty"`
-	Nth         int    `json:"nth,omitempty"` // 1-based: replace only the Nth match (like sed s/x/y/N)
+	Nth         int    `json:"nth,omitempty"`    // 1-based: replace only the Nth match (like sed s/x/y/N)
+	Symbol      string `json:"symbol,omitempty"` // restrict matching to a symbol's lines, e.g. "Editor::on_escape"
 }
 
 // FileEditSpec describes edits or creation for one file.
@@ -30,6 +31,7 @@ type FileEditSpec struct {
 	Hunks     []EditHunk `json:"hunks,omitempty"`
 	Create    *string    `json:"create,omitempty"`
 	Overwrite bool       `json:"overwrite,omitempty"`
+	EOL       string     `json:"eol,omitempty"`
 }
 
 type plannedFileWrite struct {
@@ -136,6 +138,7 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 					EndLine:     optInt(opts, "endLine", 0),
 					ReplaceAll:  optBool(opts, "replaceAll", optBool(opts, "all", false)),
 					Nth:         optInt(opts, "nth", optInt(opts, "occurrence", 0)),
+					Symbol:      firstString(opts, "symbol", "in"),
 				}},
 			}
 			return b.applyFileSpecs(env.Cwd, []FileEditSpec{spec}, false, false, nil)
@@ -182,6 +185,7 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 			}
 			p, _ := args[1].(string)
 			content, _ := args[2].(string)
+			eol := firstString(optsAt(args, 3), "eol")
 			txMu.Lock()
 			tx, ok := txMap[id]
 			if !ok || tx.committed || tx.rolledBack {
@@ -189,7 +193,7 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 				return nil, fmt.Errorf("transaction '%s' is not active", id)
 			}
 			defer txMu.Unlock()
-			spec := FileEditSpec{Path: p, Create: &content, Overwrite: true}
+			spec := FileEditSpec{Path: p, Create: &content, Overwrite: true, EOL: eol}
 			return b.applyFileSpecs(env.Cwd, []FileEditSpec{spec}, false, false, tx)
 		},
 		"_verify": func(ctx context.Context, args []any) (any, error) {
@@ -261,6 +265,41 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 				env.AddWarning(fmt.Sprintf("ROLLBACK FAILED for %s: %s — these files may still contain tx edits", id, formatRollbackFailures(failed)))
 			}
 			return res, nil
+		},
+		// t.rm(path): deletes a file inside the tx; rollback restores it.
+		"_rm": func(_ context.Context, args []any) (any, error) {
+			id, _ := requireStringArg(args, 0, "id")
+			p, err := requireStringArg(args, 1, "path")
+			if err != nil {
+				return nil, err
+			}
+			txMu.Lock()
+			defer txMu.Unlock()
+			tx, ok := txMap[id]
+			if !ok || tx.committed || tx.rolledBack {
+				return nil, fmt.Errorf("transaction '%s' is not active", id)
+			}
+			abs, err := b.Policy.ResolveAndCheckWrite(env.Cwd, p)
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Stat(abs)
+			if err != nil {
+				return nil, err
+			}
+			if info.IsDir() {
+				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is a directory; t.rm deletes files", p)
+			}
+			orig, err := os.ReadFile(abs)
+			if err != nil {
+				return nil, err
+			}
+			rel := relDisplayPath(env.Cwd, abs)
+			if _, seen := tx.snapshots[abs]; !seen {
+				tx.snapshots[abs] = fileSnapshot{absPath: abs, relPath: rel, existed: true, origBytes: orig}
+				tx.touched = append(tx.touched, rel)
+			}
+			return nil, os.Remove(abs)
 		},
 		// t.diff() -> unified diff of every file touched by the tx (current disk content vs. snapshot).
 		"_diff": func(_ context.Context, args []any) (any, error) {
@@ -367,6 +406,32 @@ func matchOffsets(window, target string) []int {
 		offs = append(offs, off+idx)
 		off += idx + len(target)
 	}
+}
+
+// formatMatchList renders "L2 in a, L6 in b" (symbol omitted when unknown), at most limit entries.
+func formatMatchList(lines []int, where []string, limit int) string {
+	parts := make([]string, 0, minInt(len(lines), limit)+1)
+	for i, l := range lines {
+		if i == limit {
+			parts = append(parts, fmt.Sprintf("+%d", len(lines)-limit))
+			break
+		}
+		if where[i] != "" {
+			parts = append(parts, fmt.Sprintf("L%d in %s", l, where[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("L%d", l))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// prefixHunkErr adds "hunk N" context to a symbol resolution error while keeping its kind.
+func prefixHunkErr(err error, hIdx int) error {
+	var he *sandbox.HostError
+	if errors.As(err, &he) {
+		return &sandbox.HostError{Kind: he.Kind, Msg: strings.Replace(he.Msg, ": symbol", fmt.Sprintf(" hunk %d: symbol", hIdx+1), 1), Data: he.Data}
+	}
+	return err
 }
 
 // formatLineList renders "L2, L6, L9" (at most limit entries, then "+N").
@@ -498,9 +563,9 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 		if existed && !spec.Overwrite {
 			return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s exists; pass overwrite: true", relPath)
 		}
-		newBytes := []byte(*spec.Create)
-		if existed {
-			newBytes = keepLineEndings(origBytes, newBytes)
+		newBytes, eolErr := applyEOL(relPath, origBytes, existed, []byte(*spec.Create), spec.EOL)
+		if eolErr != nil {
+			return plannedFileWrite{}, eolErr
 		}
 		oldLines := 0
 		if existed {
@@ -538,8 +603,33 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 	}
 	var spans []span
 
+	var syms []SymbolInfo
+	symsLoaded := false
+	outline := func() []SymbolInfo {
+		if !symsLoaded {
+			syms, _ = outlineFromSource(absPath, origBytes)
+			symsLoaded = true
+		}
+		return syms
+	}
+	sep := symbolSep(relPath)
+
 	for hIdx, h := range spec.Hunks {
 		normTarget := strings.ReplaceAll(h.Target, "\r\n", "\n")
+		scope := fmt.Sprintf("L%d-%d", h.StartLine, h.EndLine)
+		if h.Symbol != "" {
+			s, sErr := resolveSymbol(outline(), h.Symbol, relPath)
+			if sErr != nil {
+				return plannedFileWrite{}, prefixHunkErr(sErr, hIdx)
+			}
+			if h.StartLine < s.StartLine {
+				h.StartLine = s.StartLine
+			}
+			if h.EndLine == 0 || h.EndLine > s.EndLine {
+				h.EndLine = s.EndLine
+			}
+			scope = h.Symbol + fmt.Sprintf(" (L%d-%d)", s.StartLine, s.EndLine)
+		}
 		normRepl := strings.ReplaceAll(h.Replacement, "\r\n", "\n")
 		if normTarget == "" {
 			return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s hunk %d: empty target", relPath, hIdx+1)
@@ -572,10 +662,10 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 			firstIdx := strings.Index(windowText, normTarget)
 			if firstIdx < 0 {
 				// Check if target exists outside the specified startLine..endLine window (drifted lines hint!)
-				if (h.StartLine > 0 || h.EndLine > 0) && strings.Contains(normText, normTarget) {
+				if (h.StartLine > 0 || h.EndLine > 0 || h.Symbol != "") && strings.Contains(normText, normTarget) {
 					actualOff := strings.Index(normText, normTarget)
 					actualLine := offsetToLineNumber(lineStarts, actualOff)
-					return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, map[string]any{"lines": []int{actualLine}}, "%s hunk %d: target not in L%d-%d; exact match at L%d", relPath, hIdx+1, h.StartLine, h.EndLine, actualLine)
+					return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, map[string]any{"lines": []int{actualLine}}, "%s hunk %d: target not in %s; exact match at L%d", relPath, hIdx+1, scope, actualLine)
 				}
 				hint := closestLineHint(normText, normTarget)
 				return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, nil, "%s hunk %d: target not found%s", relPath, hIdx+1, hint)
@@ -590,8 +680,12 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 				firstIdx = offs[h.Nth-1]
 			} else if strings.Contains(windowText[firstIdx+len(normTarget):], normTarget) {
 				lines := matchLines(windowText, normTarget, winStart, lineStarts)
-				return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindAmbiguous, map[string]any{"lines": lines},
-					"%s hunk %d: target matches %d places (%s); set nth, startLine/endLine, or replaceAll: true", relPath, hIdx+1, len(lines), formatLineList(lines, 6))
+				where := make([]string, len(lines))
+				for i, l := range lines {
+					where[i] = symbolAt(outline(), l, sep)
+				}
+				return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindAmbiguous, map[string]any{"lines": lines, "symbols": where},
+					"%s hunk %d: target matches %d places (%s); set symbol, nth, or replaceAll: true", relPath, hIdx+1, len(lines), formatMatchList(lines, where, 6))
 			}
 			absStart := winStart + firstIdx
 			spans = append(spans, span{start: absStart, end: absStart + len(normTarget), repl: normRepl, idx: hIdx})
@@ -835,6 +929,7 @@ func decodeSingleFileMap(m map[string]any) (FileEditSpec, error) {
 				Path:      p,
 				Create:    &cs,
 				Overwrite: optBool(m, "overwrite", false),
+				EOL:       firstString(m, "eol"),
 			}, nil
 		}
 	}
@@ -897,5 +992,6 @@ func decodeSingleHunk(m map[string]any) (EditHunk, error) {
 		EndLine:     optInt(m, "endLine", 0),
 		ReplaceAll:  optBool(m, "replaceAll", optBool(m, "all", false)),
 		Nth:         optInt(m, "nth", optInt(m, "occurrence", 0)),
+		Symbol:      firstString(m, "symbol", "in"),
 	}, nil
 }

@@ -17,8 +17,8 @@ const wrapperPrefixLines = 2
 
 var (
 	importTypeLineRegex    = regexp.MustCompile(`^\s*import\s+type\s+[^;]+;?\s*$`)
-	importDefaultShimRegex = regexp.MustCompile(`^\s*import\s+(?:\*\s+as\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+["'](?:node:)?(buffer|path|crypto|url|fs(?:/promises)?)["']\s*;?\s*$`)
-	importNamedShimRegex   = regexp.MustCompile(`^\s*import\s*\{([^}]+)\}\s*from\s+["'](?:node:)?(buffer|path|crypto|url|fs(?:/promises)?)["']\s*;?\s*$`)
+	importDefaultShimRegex = regexp.MustCompile(`^\s*import\s+(?:\*\s+as\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+["'](?:node:)?(buffer|path|crypto|url|os|process|fs(?:/promises)?)["']\s*;?\s*$`)
+	importNamedShimRegex   = regexp.MustCompile(`^\s*import\s*\{([^}]+)\}\s*from\s+["'](?:node:)?(buffer|path|crypto|url|os|process|fs(?:/promises)?)["']\s*;?\s*$`)
 	payloadDotRegex        = regexp.MustCompile(`\b(?:P|payloads)\.([A-Za-z_$][A-Za-z0-9_$]*)\b`)
 	payloadBracketRegex    = regexp.MustCompile(`\b(?:P|payloads)\[\s*["']([^"']+)["']\s*\]`)
 	jsStackLocRegex        = regexp.MustCompile(`user_program\.ts:(\d+):(\d+)`)

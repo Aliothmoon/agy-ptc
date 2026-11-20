@@ -172,7 +172,7 @@ func TestEngineHard8800ByteInlineCapAndStateAutoSpill(t *testing.T) {
 	if len(out) > output.DefaultInlineMaxBytes {
 		t.Fatalf("output UTF-8 byte length (%d) exceeded hard inline cap (%d)!", len(out), output.DefaultInlineMaxBytes)
 	}
-	if !strings.Contains(out, "__last_result") {
+	if !strings.Contains(out, "truncated; full value: state.get('__result_") {
 		t.Fatalf("expected auto-spill state hint in truncated output, got: %s", out)
 	}
 
@@ -679,7 +679,7 @@ func TestNamespaceFeatureDetectionDoesNotThrowWhileDirectCallStillRaisesUnknownM
 		t.Fatalf("unexpected error on large result: %s", outSpill)
 	}
 	firstLine := strings.SplitN(outSpill, "\n", 2)[0]
-	if !strings.Contains(firstLine, "state.get('__result_") || !strings.Contains(firstLine, "truncated preview") {
+	if !strings.Contains(firstLine, "truncated; full value: state.get('__result_") {
 		t.Fatalf("expected auto-spill header notice on line 1, got: %s", firstLine)
 	}
 }
@@ -745,7 +745,7 @@ func TestPrintStdoutFirstModeFullBudgetNoJSONEscapingAndAutoSpill(t *testing.T) 
 		t.Fatalf("unexpected error on big stdout: %s", outBig)
 	}
 	firstLine := strings.SplitN(outBig, "\n", 2)[0]
-	if !strings.Contains(firstLine, "full stdout saved in state.get('__result_") {
+	if !strings.Contains(firstLine, "truncated; full value: state.get('__result_") {
 		t.Fatalf("expected stdout spill notice on line 1, got: %s", firstLine)
 	}
 	// Verify next turn can read the full intact stdout string from state.get('__last_result')

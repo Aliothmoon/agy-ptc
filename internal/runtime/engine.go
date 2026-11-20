@@ -434,8 +434,7 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 			spillKey := store.SaveAutoSpill(stdout)
 			hint := ""
 			if spillKey != "" {
-				sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full stdout saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillKey)
-				hint = fmt.Sprintf("; full stdout saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
+				sections[0], hint = spillHeader(res, spillKey, stdout)
 				avail = maxOutBytes - len(sections[0]) - 24
 				if avail < 800 {
 					avail = 800
@@ -474,8 +473,7 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 			hint := ""
 			avail := totalAvail
 			if spillKey != "" {
-				sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full intact object saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillKey)
-				hint = fmt.Sprintf("; full object saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
+				sections[0], hint = spillHeader(res, spillKey, res.Value)
 				avail = maxOutBytes - len(sections[0]) - 24
 				if avail < 800 {
 					avail = 800
@@ -490,23 +488,18 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 		// Dynamically split the inline budget between Logs and Result so a tiny Result lets Logs use the rest (and vice versa).
 		autoSpilled = true
 		var spillPayload any
-		spillLabel := "output"
 		if len(resSection) > totalAvail/2 && len(logSection) > totalAvail/2 {
 			spillPayload = map[string]any{"logs": rawLogs, "result": res.Value}
-			spillLabel = "logs + result"
 		} else if len(resSection) > len(logSection) {
 			spillPayload = res.Value
-			spillLabel = "object"
 		} else {
 			spillPayload = rawLogs
-			spillLabel = "stdout"
 		}
 		spillKey := store.SaveAutoSpill(spillPayload)
 		hint := ""
 		avail := totalAvail
 		if spillKey != "" {
-			sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full %s saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillLabel, spillKey)
-			hint = fmt.Sprintf("; full %s saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillLabel, spillKey)
+			sections[0], hint = spillHeader(res, spillKey, spillPayload)
 			avail = maxOutBytes - len(sections[0]) - 24
 			if avail < 800 {
 				avail = 800
@@ -601,4 +594,11 @@ func opLabel(t sandbox.OpTrace) string {
 		return t.Capability
 	}
 	return t.Capability + "(" + t.Target + ")"
+}
+
+// spillHeader is the header (with the spilled value's shape) and truncation hint for an auto-spilled result.
+func spillHeader(res *sandbox.ExecResult, key string, payload any) (string, string) {
+	header := fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated; full value: state.get('%s')]\nShape: %s",
+		len(res.Traces), res.DurationMs, key, output.TruncateWithByteNotice(output.Shape(payload), 600))
+	return header, fmt.Sprintf("; full value: state.get('%s')", key)
 }

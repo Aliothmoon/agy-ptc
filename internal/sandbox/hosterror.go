@@ -198,7 +198,8 @@ func PublicOpName(capability string) string {
 // sideEffectOps are listed in error envelopes so the model does not blindly repeat non-idempotent work.
 // Read-only ops are omitted to save tokens; t.edit/t.write are omitted because uncommitted tx edits are rolled back.
 var sideEffectOps = map[string]bool{
-	"fs.write": true, "edit.apply": true, "edit.replace": true, "t.commit": true,
+	"fs.write": true, "fs.mkdir": true, "fs.rm": true, "fs.rename": true, "fs.cp": true,
+	"edit.apply": true, "edit.replace": true, "t.commit": true,
 	"sh.exec": true, "sh.checks": true, "t.verify": true, "mcp.call": true, "tools.call": true,
 }
 

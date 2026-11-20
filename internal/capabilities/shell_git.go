@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -60,7 +59,8 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 				settle = false
 			}
 			compact := optBool(opts, "compact", false)
-			res, err := b.RunSingleCommandDuration(ctx, workDir, cmdStr, cmdTimeout, settle, compact)
+			extraEnv, _ := opts["env"].(map[string]any)
+			res, err := b.runShell(ctx, workDir, cmdStr, cmdTimeout, settle, compact, firstString(opts, "shell"), extraEnv)
 			if err != nil {
 				return nil, err
 			}
@@ -89,6 +89,10 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 
 	if err := env.SetNamespace("sh", shAsync, nil); err != nil {
 		return err
+	}
+	// sh.shell tells the program which dialect sh.exec speaks by default ("pwsh" | "cmd" | "sh").
+	if shObj := env.VM.Get("sh"); shObj != nil {
+		_ = shObj.ToObject(env.VM).Set("shell", defaultShellName())
 	}
 
 	gitAsync := map[string]sandbox.AsyncHostFunc{
@@ -230,7 +234,16 @@ func (b *ShellGitBinder) RunSingleCommand(parentCtx context.Context, cwd, cmdLin
 
 // RunSingleCommandDuration executes one shell command after validating policy rules, killing the entire child process tree on timeout.
 func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd, cmdLine string, timeoutDur time.Duration, settle, compact bool) (map[string]any, error) {
+	return b.runShell(parentCtx, cwd, cmdLine, timeoutDur, settle, compact, "", nil)
+}
+
+// runShell runs cmdLine through `shell` ("" = platform default) with optional extra environment variables.
+func (b *ShellGitBinder) runShell(parentCtx context.Context, cwd, cmdLine string, timeoutDur time.Duration, settle, compact bool, shell string, extraEnv map[string]any) (map[string]any, error) {
 	if err := b.Policy.CheckCommand(cmdLine); err != nil {
+		return nil, err
+	}
+	shellExe, shellArgs, err := resolveShell(shell)
+	if err != nil {
 		return nil, err
 	}
 	if timeoutDur <= 0 {
@@ -243,18 +256,12 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 	defer cancel()
 
 	start := time.Now()
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		if pwshPath, err := exec.LookPath("pwsh"); err == nil {
-			cmd = exec.CommandContext(ctx, pwshPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmdLine)
-		} else {
-			cmd = exec.CommandContext(ctx, "cmd.exe", "/d", "/s", "/c", cmdLine)
-		}
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", cmdLine)
-	}
+	cmd := exec.CommandContext(ctx, shellExe, append(shellArgs, cmdLine)...)
 	cmd.Dir = cwd
 	setSysProcAttrHide(cmd)
+	if len(extraEnv) > 0 {
+		cmd.Env = mergeEnv(extraEnv)
+	}
 
 	stdout := newLimitedSyncBuffer(512 * 1024)
 	stderr := newLimitedSyncBuffer(256 * 1024)

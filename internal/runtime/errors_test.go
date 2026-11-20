@@ -47,7 +47,7 @@ await t.commit();`)
 	if !isErr {
 		t.Fatalf("expected error, got: %s", out)
 	}
-	want := "Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2, L6); set nth, startLine/endLine, or replaceAll: true"
+	want := "Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2 in a, L6 in b); set symbol, nth, or replaceAll: true"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing concise message %q in:\n%s", want, out)
 	}
