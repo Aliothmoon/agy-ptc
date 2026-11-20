@@ -217,10 +217,12 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 			} else {
 				checkArgs = args[1:]
 			}
+			warnChecksTimeoutUnit(env, "t.verify", checkArgs)
 			res, err := b.ShellRunner.RunChecksBatch(ctx, env.Cwd, checkArgs)
 			if err != nil {
 				return nil, err
 			}
+			warnTruncatedChecks(env, "t.verify", res)
 			txMu.Lock()
 			tx.lastVerify = res
 			txMu.Unlock()

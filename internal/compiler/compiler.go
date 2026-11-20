@@ -31,7 +31,7 @@ type CompileResult struct {
 	SourceLine []string
 
 	lineMapOnce sync.Once
-	lineMap     map[int]int
+	lineMap     map[int][]segPos
 }
 
 // CompileError describes a static syntax or payload preflight error with 1-based user source lines.
@@ -247,7 +247,7 @@ func FormatRuntimeError(errText string, cr *CompileResult) string {
 		var genLine, genCol int
 		fmt.Sscanf(sub[1], "%d", &genLine)
 		fmt.Sscanf(sub[2], "%d", &genCol)
-		userLine := mapLine(genLine, lineMap, len(cr.SourceLine))
+		userLine := mapLine(genLine, genCol, lineMap, len(cr.SourceLine))
 		return fmt.Sprintf("code:%d:%d", userLine, genCol)
 	})
 	return rewritten
@@ -257,8 +257,16 @@ type sourceMapJSON struct {
 	Mappings string `json:"mappings"`
 }
 
-func buildGeneratedToUserLineMap(rawMap []byte) map[int]int {
-	out := map[int]int{}
+// segPos maps a 0-based generated column to a 1-based user line.
+type segPos struct {
+	col      int
+	userLine int
+}
+
+// buildGeneratedToUserLineMap keeps every mapping segment per generated line: esbuild joins multi-line
+// expressions (e.g. `a\n  .map()\n  .slice()`) into one generated line, so the column decides the user line.
+func buildGeneratedToUserLineMap(rawMap []byte) map[int][]segPos {
+	out := map[int][]segPos{}
 	if len(rawMap) == 0 {
 		return out
 	}
@@ -266,24 +274,22 @@ func buildGeneratedToUserLineMap(rawMap []byte) map[int]int {
 	if err := json.Unmarshal(rawMap, &sm); err != nil || sm.Mappings == "" {
 		return out
 	}
-	origLine := 0 // 0-based in VLQ
-	genLines := strings.Split(sm.Mappings, ";")
-	for genIdx, group := range genLines {
-		if group == "" {
-			continue
-		}
-		segments := strings.Split(group, ",")
-		recorded := false
-		for _, seg := range segments {
+	origLine := 0 // 0-based in VLQ, relative across the whole map
+	for genIdx, group := range strings.Split(sm.Mappings, ";") {
+		genCol := 0 // resets on every generated line
+		for _, seg := range strings.Split(group, ",") {
+			if seg == "" {
+				continue
+			}
 			fields := decodeVLQ(seg)
+			if len(fields) == 0 {
+				continue
+			}
+			genCol += fields[0]
 			if len(fields) >= 4 {
 				origLine += fields[2]
-				if !recorded {
-					userLine := (origLine + 1) - wrapperPrefixLines
-					if userLine >= 1 {
-						out[genIdx+1] = userLine
-						recorded = true
-					}
+				if userLine := (origLine + 1) - wrapperPrefixLines; userLine >= 1 {
+					out[genIdx+1] = append(out[genIdx+1], segPos{col: genCol, userLine: userLine})
 				}
 			}
 		}
@@ -291,8 +297,18 @@ func buildGeneratedToUserLineMap(rawMap []byte) map[int]int {
 	return out
 }
 
-func mapLine(genLine int, lineMap map[int]int, totalUserLines int) int {
-	if u, ok := lineMap[genLine]; ok {
+// mapLine resolves a generated 1-based line (and optional 1-based column, 0 = unknown) to the user's line.
+func mapLine(genLine, genCol int, lineMap map[int][]segPos, totalUserLines int) int {
+	if segs := lineMap[genLine]; len(segs) > 0 {
+		u := segs[0].userLine
+		if genCol > 0 {
+			for _, s := range segs { // segments are sorted by generated column; goja columns are 1-based
+				if s.col > genCol-1 {
+					break
+				}
+				u = s.userLine
+			}
+		}
 		if u > totalUserLines && totalUserLines > 0 {
 			return totalUserLines
 		}

@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path, { detail? })` -> `string[]` (dirs end with `/`) · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults?, filesOnly?, count? })`
 - `search.glob(pattern, { path?, maxResults? })` (supports `{a,b}` braces + automatic fallback recovery)
 - **External Paths**: Relative paths resolve against `cwd`; external non-sensitive paths (`D:/OtherRepo/...`, `../shared/...`) are also supported across all capabilities unless disabled by policy.

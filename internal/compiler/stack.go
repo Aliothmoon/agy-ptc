@@ -10,10 +10,11 @@ import (
 // ProgramName is the source name given to the compiled user program inside goja; stack frames carrying it are user code.
 const ProgramName = "user_program.ts"
 
-// UserLine maps a 1-based line of the compiled JS (as reported by goja for ProgramName) to the user's source line.
-func (cr *CompileResult) UserLine(genLine int) int {
+// UserLine maps a 1-based line/column of the compiled JS (as reported by goja for ProgramName) to the user's
+// source line; column 0 means unknown.
+func (cr *CompileResult) UserLine(genLine, genCol int) int {
 	cr.lineMapOnce.Do(func() { cr.lineMap = buildGeneratedToUserLineMap(cr.SourceMap) })
-	return mapLine(genLine, cr.lineMap, len(cr.SourceLine))
+	return mapLine(genLine, genCol, cr.lineMap, len(cr.SourceLine))
 }
 
 var codeFrameRegex = regexp.MustCompile(`code:(\d+)`)

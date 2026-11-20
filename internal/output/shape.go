@@ -28,7 +28,7 @@ func Shape(v any) string {
 	case []any:
 		return brief(x, true)
 	case string:
-		return fmt.Sprintf("string(%s, %d lines)", humanBytes(len(x)), strings.Count(x, "\n")+1)
+		return fmt.Sprintf("string(%s, %d lines)", HumanBytes(len(x)), strings.Count(x, "\n")+1)
 	}
 	return brief(v, false)
 }
@@ -38,7 +38,7 @@ func brief(v any, withElem bool) string {
 	case nil:
 		return "null"
 	case string:
-		return "string(" + humanBytes(len(x)) + ")"
+		return "string(" + HumanBytes(len(x)) + ")"
 	case bool:
 		return "bool"
 	case int, int32, int64, float32, float64, uint, uint32, uint64:
@@ -67,7 +67,8 @@ func brief(v any, withElem bool) string {
 	return fmt.Sprintf("%T", v)
 }
 
-func humanBytes(n int) string {
+// HumanBytes renders a byte count as B/KB/MB.
+func HumanBytes(n int) string {
 	switch {
 	case n < 1024:
 		return fmt.Sprintf("%dB", n)

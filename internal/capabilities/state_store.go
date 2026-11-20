@@ -29,6 +29,17 @@ type StateStore struct {
 	filePath string
 	entries  map[string]stateEntry
 	seq      int64
+	dirty    bool // pending changes; persisted by Flush (once per exec) instead of on every state.set
+}
+
+// Flush persists pending changes to disk.
+func (s *StateStore) Flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dirty {
+		s.saveToDiskLocked()
+		s.dirty = false
+	}
 }
 
 type stateEntry struct {
@@ -135,7 +146,7 @@ func (s *StateStore) Set(key string, val any) error {
 		Bytes:     len(raw),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	s.saveToDiskLocked()
+	s.dirty = true
 	return nil
 }
 
@@ -178,7 +189,7 @@ func (s *StateStore) Delete(key string) bool {
 	_, existed := s.entries[key]
 	delete(s.entries, key)
 	if existed {
-		s.saveToDiskLocked()
+		s.dirty = true
 	}
 	return existed
 }
@@ -200,7 +211,7 @@ func (s *StateStore) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries = map[string]stateEntry{}
-	s.saveToDiskLocked()
+	s.dirty = true
 }
 
 func (s *StateStore) evictAutoSpillsLocked(bytesNeeded int) {

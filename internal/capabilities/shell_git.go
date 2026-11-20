@@ -53,6 +53,7 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 				workDir = resolved
 			}
 			cmdTimeout := resolveCommandTimeout(opts, DefaultShellTimeout)
+			warnTimeoutUnit(env, "sh.exec", opts)
 			// Default settle=true (pi-fabric native style): non-zero exit codes return `{ ok: false, exitCode, output }`
 			// instead of blowing up Promise.all! Callers wanting exceptions can pass `{ throwOnError: true }` or `{ settle: false }`.
 			settle := optBool(opts, "settle", true)
@@ -65,6 +66,7 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
+			warnTruncatedOutput(env, "sh.exec", res)
 			return res, nil
 		},
 		// sh.run(file, args?, opts?) runs a program directly (no shell) -> { ok, exitCode, timedOut, stdout, stderr, durationMs }.
@@ -84,7 +86,12 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			return b.RunArgv(ctx, env, workDir, file, argv, opts)
 		},
 		"checks": func(ctx context.Context, args []any) (any, error) {
-			return b.RunChecksBatch(ctx, env.Cwd, args)
+			warnChecksTimeoutUnit(env, "sh.checks", args)
+			res, err := b.RunChecksBatch(ctx, env.Cwd, args)
+			if err == nil {
+				warnTruncatedChecks(env, "sh.checks", res)
+			}
+			return res, err
 		},
 	}
 
@@ -109,7 +116,8 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"diff"}, extra...))
+			out, dropped, err := runReadOnlyGitSoft(ctx, repoDir, append([]string{"diff"}, extra...))
+			return gitText(env, "git.diff", out, dropped, err)
 		},
 		"log": func(ctx context.Context, args []any) (any, error) {
 			repoDir, extra, err := b.resolveGitDirAndTail(env.Cwd, args)
@@ -122,7 +130,8 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 				// Object form keeps the concise defaults unless overridden: git.log({ n: 5 }) -> 5 oneline entries.
 				extra = withLogDefaults(extra)
 			}
-			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"log"}, extra...))
+			out, dropped, err := runReadOnlyGitSoft(ctx, repoDir, append([]string{"log"}, extra...))
+			return gitText(env, "git.log", out, dropped, err)
 		},
 		"show": func(ctx context.Context, args []any) (any, error) {
 			repoDir, extra, err := b.resolveGitDirAndTail(env.Cwd, args)
@@ -132,14 +141,16 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if len(extra) == 0 {
 				extra = []string{"--stat", "HEAD"}
 			}
-			return runReadOnlyGitSoft(ctx, repoDir, append([]string{"show"}, extra...))
+			out, dropped, err := runReadOnlyGitSoft(ctx, repoDir, append([]string{"show"}, extra...))
+			return gitText(env, "git.show", out, dropped, err)
 		},
 		"branch": func(ctx context.Context, args []any) (any, error) {
 			repoDir, _, err := b.resolveGitDirAndTail(env.Cwd, args)
 			if err != nil {
 				return nil, err
 			}
-			return runReadOnlyGitSoft(ctx, repoDir, []string{"branch", "--list", "-v"})
+			out, dropped, err := runReadOnlyGitSoft(ctx, repoDir, []string{"branch", "--list", "-v"})
+			return gitText(env, "git.branch", out, dropped, err)
 		},
 		"blame": func(ctx context.Context, args []any) (any, error) {
 			targetPath, opts, err := parsePathAndOpts(args)
@@ -165,7 +176,8 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 				gitArgs = append(gitArgs, fmt.Sprintf("-L%d,%d", sLine, eLine))
 			}
 			gitArgs = append(gitArgs, "--", absFile)
-			return runReadOnlyGitSoft(ctx, filepath.Dir(absFile), gitArgs)
+			out, dropped, err := runReadOnlyGitSoft(ctx, filepath.Dir(absFile), gitArgs)
+			return gitText(env, "git.blame", out, dropped, err)
 		},
 		"query": func(ctx context.Context, args []any) (any, error) {
 			rawCmd, err := requireStringArg(args, 0, "subcommand")
@@ -188,7 +200,8 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if len(tokens) > 0 && tokens[0] == "git" {
 				tokens = tokens[1:]
 			}
-			return runReadOnlyGitSoft(ctx, repoDir, tokens)
+			out, dropped, err := runReadOnlyGitSoft(ctx, repoDir, tokens)
+			return gitText(env, "git.query", out, dropped, err)
 		},
 	}
 	return env.SetNamespace("git", gitAsync, nil)
@@ -298,6 +311,10 @@ func (b *ShellGitBinder) runShell(parentCtx context.Context, cwd, cmdLine string
 	if compact || timedOut || parentErr != nil {
 		maxCmdBytes = 8000
 	}
+	dropped := stdout.droppedBytes() + stderr.droppedBytes()
+	if raw := len(stdout.String()) + len(stderr.String()); !compact && !timedOut && parentErr == nil && raw > maxCmdBytes {
+		dropped += raw - maxCmdBytes
+	}
 	formatted := output.FormatCommandOutput(output.CommandFormatParams{
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
@@ -331,6 +348,9 @@ func (b *ShellGitBinder) runShell(parentCtx context.Context, cwd, cmdLine string
 		"timedOut":   timedOut,
 		"durationMs": durMs,
 		"output":     formatted,
+	}
+	if dropped > 0 {
+		envelope["truncated"] = dropped // bytes cut from the middle of output
 	}
 
 	if !ok && !settle {
@@ -500,19 +520,19 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 // runReadOnlyGitSoft softens benign repository state conditions ("not a git repository", "does not have any commits yet")
 // into descriptive strings so exploratory Promise.all([search.rg(...), git.log()]) calls never crash on non-git or empty repos.
 // Invalid/disallowed git subcommands or flags still return hard errors.
-func runReadOnlyGitSoft(ctx context.Context, cwd string, gitArgs []string) (string, error) {
-	out, err := runReadOnlyGit(ctx, cwd, gitArgs)
+func runReadOnlyGitSoft(ctx context.Context, cwd string, gitArgs []string) (string, int, error) {
+	out, dropped, err := runReadOnlyGit(ctx, cwd, gitArgs)
 	if err == nil {
-		return out, nil
+		return out, dropped, nil
 	}
 	low := strings.ToLower(err.Error())
 	if strings.Contains(low, "not a git repository") {
-		return "(not a git repository)", nil
+		return "(not a git repository)", 0, nil
 	}
 	if strings.Contains(low, "does not have any commits yet") || strings.Contains(low, "ambiguous argument 'head'") {
-		return "(no commits yet)", nil
+		return "(no commits yet)", 0, nil
 	}
-	return "", err
+	return "", 0, err
 }
 
 // Read-only option allowlists for git subcommands that ALSO have mutating forms (`git branch -D`, `git tag -d`,
@@ -622,9 +642,9 @@ func validateListOnlyArgs(sub string, args []string, longOpts map[string]bool, s
 	return nil
 }
 
-func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, error) {
+func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, int, error) {
 	if err := validateReadOnlyGitArgs(gitArgs); err != nil {
-		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%v", err)
+		return "", 0, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%v", err)
 	}
 	sub := gitArgs[0]
 
@@ -641,15 +661,77 @@ func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, 
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		if cctx.Err() != nil {
-			return "", fmt.Errorf("git %s timed out: %w", sub, cctx.Err())
+			return "", 0, fmt.Errorf("git %s timed out: %w", sub, cctx.Err())
 		}
-		return "", fmt.Errorf("git %s failed: %s", sub, strings.TrimSpace(stderr.String()))
+		return "", 0, fmt.Errorf("git %s failed: %s", sub, strings.TrimSpace(stderr.String()))
 	}
-	return output.TruncateHeadTailBytes(strings.TrimRight(stdout.String(), "\r\n"), 256*1024, ""), nil
+	text := strings.TrimRight(stdout.String(), "\r\n")
+	dropped := stdout.droppedBytes()
+	if len(text) > maxGitOutputBytes {
+		dropped += len(text) - maxGitOutputBytes
+	}
+	return output.TruncateHeadTailBytes(text, maxGitOutputBytes, ""), dropped, nil
+}
+
+const maxGitOutputBytes = 256 * 1024
+
+// warnTruncatedOutput names the op whose command output lost its middle (result field `truncated` = bytes dropped).
+func warnTruncatedOutput(env *sandbox.ExecutionEnv, op string, res map[string]any) {
+	if n, ok := res["truncated"].(int); ok && n > 0 {
+		env.AddWarning(fmt.Sprintf("%s: output middle truncated (%s dropped); filter in code, redirect to a file, or use sh.run", op, output.HumanBytes(n)))
+	}
+}
+
+// warnTimeoutUnit makes the `timeout` unit heuristic visible: values < 500 are read as seconds
+// (`timeout: 30`), larger ones as milliseconds (`timeout: 5000`).
+func warnTimeoutUnit(env *sandbox.ExecutionEnv, op string, opts map[string]any) {
+	if opts == nil || opts["timeoutMs"] != nil || opts["timeoutSec"] != nil {
+		return
+	}
+	if n := optInt(opts, "timeout", 0); n > 0 && n < 500 {
+		env.AddWarning(fmt.Sprintf("%s: timeout %d read as seconds; use timeoutMs or timeoutSec to be explicit", op, n))
+	}
+}
+
+func warnChecksTimeoutUnit(env *sandbox.ExecutionEnv, op string, args []any) {
+	if len(args) > 1 {
+		if m, ok := args[1].(map[string]any); ok {
+			warnTimeoutUnit(env, op, m)
+		}
+	}
+	if len(args) > 0 {
+		if list, ok := args[0].([]any); ok {
+			for _, item := range list {
+				if m, ok := item.(map[string]any); ok {
+					warnTimeoutUnit(env, op, m)
+				}
+			}
+		}
+	}
+}
+
+func warnTruncatedChecks(env *sandbox.ExecutionEnv, op string, res map[string]any) {
+	results, _ := res["results"].([]map[string]any)
+	for _, r := range results {
+		if n, ok := r["truncated"].(int); ok && n > 0 {
+			cmd, _ := r["command"].(string)
+			env.AddWarning(fmt.Sprintf("%s: output of `%s` middle truncated (%s dropped)", op, cmd, output.HumanBytes(n)))
+		}
+	}
+}
+
+func gitText(env *sandbox.ExecutionEnv, op, out string, dropped int, err error) (any, error) {
+	if err != nil {
+		return nil, err
+	}
+	if dropped > 0 {
+		env.AddWarning(fmt.Sprintf("%s: output middle truncated (%s dropped); narrow with path, n, or stat", op, output.HumanBytes(dropped)))
+	}
+	return out, nil
 }
 
 func runGitStructuredStatus(ctx context.Context, cwd string) (map[string]any, error) {
-	raw, err := runReadOnlyGit(ctx, cwd, []string{"status", "--porcelain=v1", "-b"})
+	raw, _, err := runReadOnlyGit(ctx, cwd, []string{"status", "--porcelain=v1", "-b"})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "not a git repository") {
 			return map[string]any{

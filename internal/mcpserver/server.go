@@ -331,7 +331,7 @@ func execToolDefinition() map[string]any {
 			"properties": map[string]any{
 				"code": map[string]any{
 					"type":        "string",
-					"description": "TypeScript async function body (top-level `await`, `print()`/`console.log()` stdout, and `return` supported; do not wrap in `async function`). Globals: `fs`, `search`, `ast`, `edit`, `tx`, `git`, `sh`, `state`, `tools`, `mcp`, `P`/`payloads`, plus `Buffer`, `TextEncoder`/`TextDecoder`, `btoa`/`atob`, `path`, `crypto`, `URL`/`URLSearchParams`.",
+					"description": "TypeScript async function body (top-level `await`, `print()`/`console.log()` stdout, and `return` supported; do not wrap in `async function`). Globals: `fs`, `search`, `ast`, `edit`, `tx`, `git`, `sh`, `state`, `tools`, `mcp`, `P`/`payloads`, plus `Buffer`, `TextEncoder`/`TextDecoder`, `btoa`/`atob`, `path`, `crypto`, `URL`/`URLSearchParams`, `process`/`os`, `setTimeout`, `structuredClone`.",
 				},
 				"payloads": map[string]any{
 					"type":                 "object",

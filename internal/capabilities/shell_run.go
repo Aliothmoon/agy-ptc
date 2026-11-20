@@ -120,6 +120,7 @@ func (b *ShellGitBinder) RunArgv(parentCtx context.Context, env *sandbox.Executi
 	}
 
 	timeout := resolveCommandTimeout(opts, DefaultShellTimeout)
+	warnTimeoutUnit(env, "sh.run", opts)
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 

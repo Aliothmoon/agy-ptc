@@ -63,6 +63,7 @@ type OpTrace struct {
 	Status     string `json:"status"` // "ok" | "error"
 	Kind       string `json:"kind,omitempty"`
 	Error      string `json:"error,omitempty"`
+	Bytes      int    `json:"bytes,omitempty"` // approximate size of the result handed to the program
 }
 
 // AsyncHostFunc is a thread-safe Go function invoked asynchronously from guest JS.
@@ -197,7 +198,7 @@ func (env *ExecutionEnv) userCallSite() int {
 	}
 	for _, f := range env.VM.CaptureCallStack(8, nil) {
 		if f.SrcName() == compiler.ProgramName {
-			return env.compiled.UserLine(f.Position().Line)
+			return env.compiled.UserLine(f.Position().Line, f.Position().Column)
 		}
 	}
 	return 0
@@ -250,7 +251,7 @@ func (env *ExecutionEnv) wrapSync(capability string, fn SyncHostFunc) func(goja.
 			env.recordTrace(tr)
 			panic(jsErr())
 		}
-		env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok"})
+		env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok", Bytes: approxSize(res)})
 		return env.toJSValue(res)
 	}
 }
@@ -289,7 +290,7 @@ func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goj
 				tr, jsErr = env.hostFailure(seq, capability, target, dur, line, err)
 				env.recordTrace(tr)
 			} else {
-				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok"})
+				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok", Bytes: approxSize(res)})
 			}
 
 			select {

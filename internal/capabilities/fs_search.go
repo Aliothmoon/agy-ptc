@@ -26,7 +26,7 @@ import (
 
 const (
 	MaxSandboxReadBytes = 2 * 1024 * 1024 // 2 MB per file inside sandbox memory (never directly enters LLM context)
-	MaxSearchLineBytes  = 600             // UTF-8-safe per-line preview cap for search.rg
+	MaxSearchLineBytes  = 300             // UTF-8-safe per-line preview cap for search.rg (long lines warn)
 )
 
 var skippedWalkDirs = map[string]bool{
@@ -269,11 +269,22 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 				return nil, err
 			}
 			limit := optInt(opts, "limit", 200)
+			detail := optBool(opts, "detail", false)
+			names := []any{}
 			items := []map[string]any{}
 			for _, e := range entries {
-				if len(items) >= limit {
+				if len(names)+len(items) >= limit {
 					env.AddWarning(fmt.Sprintf("fs.list: capped at %d entries; pass { limit }", limit))
 					break
+				}
+				if !detail {
+					// Like `ls -p`: plain names, directories end with "/".
+					name := e.Name()
+					if e.IsDir() {
+						name += "/"
+					}
+					names = append(names, name)
+					continue
 				}
 				info, _ := e.Info()
 				var sz int64
@@ -286,7 +297,10 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 					"size":  sz,
 				})
 			}
-			return items, nil
+			if detail {
+				return items, nil
+			}
+			return names, nil
 		},
 		"tree": func(_ context.Context, args []any) (any, error) {
 			targetPath := "."
@@ -333,7 +347,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			}
 			absPath, err := b.Policy.ResolveAndCheckRead(env.Cwd, targetPath)
 			if err != nil {
-				return false, nil
+				return nil, err // Denied / NeedsApproval: don't pretend a blocked path is missing
 			}
 			_, statErr := os.Stat(absPath)
 			return statErr == nil, nil
@@ -359,6 +373,9 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			hits, err := b.runTextOrRegexSearch(ctx, env.Cwd, searchRoot, q)
 			if err == nil && len(hits) >= q.maxResults {
 				env.AddWarning(fmt.Sprintf("search.rg: capped at %d hits; narrow path/glob or pass { maxResults }", q.maxResults))
+			}
+			if cut := countCutLines(hits); cut > 0 {
+				env.AddWarning(fmt.Sprintf("search.rg: %d long line(s) cut at %dB; fs.read the line range for full text", cut, MaxSearchLineBytes))
 			}
 			return hits, err
 		},
@@ -979,4 +996,26 @@ func catFailReason(err error) string {
 		msg = string(r[:60]) + "…"
 	}
 	return msg
+}
+
+// countCutLines counts hit/context lines shortened to MaxSearchLineBytes (they end with "...").
+func countCutLines(hits []SearchHit) int {
+	n := 0
+	cut := func(s string) bool { return len(s) > MaxSearchLineBytes && strings.HasSuffix(s, "...") }
+	for _, h := range hits {
+		if cut(h.Text) {
+			n++
+		}
+		for _, l := range h.Before {
+			if cut(l) {
+				n++
+			}
+		}
+		for _, l := range h.After {
+			if cut(l) {
+				n++
+			}
+		}
+	}
+	return n
 }

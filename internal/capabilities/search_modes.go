@@ -27,7 +27,11 @@ func (b *FSSearchBinder) runListSearch(ctx context.Context, env *sandbox.Executi
 	var counts []fileCount
 	var err error
 	if rgBin := b.resolveRg(); rgBin != "" {
-		counts, err = runRgCounts(ctx, rgBin, env.Cwd, searchRoot, q)
+		var overflow bool
+		counts, overflow, err = runRgCounts(ctx, rgBin, env.Cwd, searchRoot, q)
+		if overflow {
+			env.AddWarning("search.rg: count output exceeded 8MB, some files are missing; narrow path/glob")
+		}
 	}
 	if counts == nil && (err == nil || ctx.Err() == nil) {
 		fq := q
@@ -81,7 +85,7 @@ func (b *FSSearchBinder) runListSearch(ctx context.Context, env *sandbox.Executi
 }
 
 // runRgCounts runs `rg --count` (matching lines per file); files mode reuses it since rg -l is just count > 0.
-func runRgCounts(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q searchQuery) ([]fileCount, error) {
+func runRgCounts(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q searchQuery) ([]fileCount, bool, error) {
 	args := []string{"--count", "--with-filename", "--no-heading", "--color=never"}
 	if q.literal {
 		args = append(args, "--fixed-strings")
@@ -108,15 +112,15 @@ func runRgCounts(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q 
 		if errors.As(err, &exitErr) && rgCtx.Err() == nil {
 			switch exitErr.ExitCode() {
 			case 1:
-				return []fileCount{}, nil
+				return []fileCount{}, false, nil
 			case 2:
-				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "invalid search pattern: %s", strings.TrimSpace(stderr.String()))
+				return nil, false, sandbox.NewHostError(sandbox.KindBadArgs, nil, "invalid search pattern: %s", strings.TrimSpace(stderr.String()))
 			}
 		}
 		if rgCtx.Err() != nil {
-			return nil, fmt.Errorf("search.rg timed out: %w", rgCtx.Err())
+			return nil, false, fmt.Errorf("search.rg timed out: %w", rgCtx.Err())
 		}
-		return nil, err
+		return nil, false, err
 	}
 	var out []fileCount
 	sc := bufio.NewScanner(strings.NewReader(stdout.String()))
@@ -136,5 +140,5 @@ func runRgCounts(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q 
 	if out == nil {
 		out = []fileCount{}
 	}
-	return out, nil
+	return out, stdout.droppedBytes() > 0, nil
 }

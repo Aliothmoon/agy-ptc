@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -135,15 +136,16 @@ func similarNames(dir, want string, n int) []string {
 		name := e.Name()
 		low := strings.ToLower(name)
 		stem := strings.TrimSuffix(low, filepath.Ext(low))
+		// Rank by edit distance; a shared stem (other extension) qualifies even when far, and breaks ties.
 		score := -1
-		switch {
-		case low == wantLow:
+		d := levenshtein(low, wantLow)
+		sameStem := stem == wantStem && wantStem != ""
+		if low == wantLow {
 			score = 0
-		case stem == wantStem && wantStem != "":
-			score = 1
-		default:
-			if d := levenshtein(low, wantLow); d <= max(2, len(wantLow)/4) {
-				score = 1 + d
+		} else if sameStem || d <= max(2, len(wantLow)/4) {
+			score = 2 * d
+			if !sameStem {
+				score++
 			}
 		}
 		if score >= 0 {
@@ -209,3 +211,26 @@ var sideEffectOps = map[string]bool{
 
 // IsSideEffectOp reports whether a (public) op name may have changed state outside the sandbox.
 func IsSideEffectOp(op string) bool { return sideEffectOps[op] }
+
+// approxSize estimates how many bytes a host result puts into the program (exact for strings).
+func approxSize(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case string:
+		return len(x)
+	case []byte:
+		return len(x)
+	case *OrderedMap:
+		n := 0
+		for i, k := range x.Keys {
+			n += len(k) + approxSize(x.Vals[i])
+		}
+		return n
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(b)
+}

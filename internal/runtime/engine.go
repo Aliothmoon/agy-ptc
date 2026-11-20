@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,9 @@ func (e *Engine) Close() {
 	for _, br := range e.bridges {
 		br.Close()
 	}
+	for _, st := range e.stores {
+		st.Flush()
+	}
 }
 
 // ExecInput represents the flat MCP arguments passed to `exec`.
@@ -116,6 +120,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 
 	pol := policy.NewEngine(cwd)
 	store, bridge := e.workspaceResources(cwd, pol)
+	defer store.Flush() // state writes (state.set, auto-spills) hit disk once per exec
 
 	fsSearch := &capabilities.FSSearchBinder{Policy: pol}
 	astBinder := &capabilities.ASTBinder{Policy: pol}
@@ -600,5 +605,28 @@ func opLabel(t sandbox.OpTrace) string {
 func spillHeader(res *sandbox.ExecResult, key string, payload any) (string, string) {
 	header := fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated; full value: state.get('%s')]\nShape: %s",
 		len(res.Traces), res.DurationMs, key, output.TruncateWithByteNotice(output.Shape(payload), 600))
+	if top := largestResults(res.Traces, 3, 2048); top != "" {
+		header += "\nLargest results: " + top
+	}
 	return header, fmt.Sprintf("; full value: state.get('%s')", key)
+}
+
+// largestResults names the host calls that brought the most data into the program (top n, each >= minBytes),
+// so a truncated response says which API to filter next time.
+func largestResults(traces []sandbox.OpTrace, n, minBytes int) string {
+	big := make([]sandbox.OpTrace, 0, len(traces))
+	for _, t := range traces {
+		if t.Status == "ok" && t.Bytes >= minBytes {
+			big = append(big, t)
+		}
+	}
+	sort.SliceStable(big, func(i, j int) bool { return big[i].Bytes > big[j].Bytes })
+	if len(big) > n {
+		big = big[:n]
+	}
+	parts := make([]string, len(big))
+	for i, t := range big {
+		parts[i] = opLabel(t) + " " + output.HumanBytes(t.Bytes)
+	}
+	return strings.Join(parts, ", ")
 }
