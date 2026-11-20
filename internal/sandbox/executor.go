@@ -1,0 +1,703 @@
+package sandbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/alioth/agy-ptc/internal/compiler"
+	"github.com/dop251/goja"
+)
+
+const (
+	DefaultTimeout = 60 * time.Second
+	MaxTimeout     = 300 * time.Second
+	DefaultMaxOps  = 400
+	MaxLogEntries  = 120
+	MaxLogBytes    = 8192
+)
+
+// OpTrace records a single host capability call executed by a guest program.
+type OpTrace struct {
+	Seq        int    `json:"seq"`
+	Capability string `json:"capability"`
+	Target     string `json:"target,omitempty"`
+	DurationMs int64  `json:"durationMs"`
+	Status     string `json:"status"` // "ok" | "error"
+	Error      string `json:"error,omitempty"`
+}
+
+// AsyncHostFunc is a thread-safe Go function invoked asynchronously from guest JS.
+// Arguments have already been exported on the VM thread before running in a goroutine.
+type AsyncHostFunc func(ctx context.Context, args []any) (any, error)
+
+// SyncHostFunc runs synchronously on the VM thread.
+type SyncHostFunc func(ctx context.Context, args []any) (any, error)
+
+// Binder allows capability packages to register namespaces onto an ExecutionEnv.
+type Binder interface {
+	Bind(env *ExecutionEnv) error
+}
+
+// ExecRequest describes a single PTC program invocation.
+type ExecRequest struct {
+	Title     string
+	Code      string
+	Payloads  map[string]string
+	Cwd       string
+	Timeout   time.Duration
+	MaxOps    int
+	OnOpStart func(capability, target string, seq int)
+}
+
+// ExecResult contains the outcome, logs, and operation trace of a PTC execution.
+type ExecResult struct {
+	Value      any       `json:"value"`
+	Logs       []string  `json:"logs,omitempty"`
+	Traces     []OpTrace `json:"traces,omitempty"`
+	DurationMs int64     `json:"durationMs"`
+}
+
+// ExecutionError wraps compile or runtime failures along with partial logs and completed traces.
+type ExecutionError struct {
+	Phase      string // "compile" | "runtime" | "timeout"
+	Message    string
+	Logs       []string
+	Traces     []OpTrace
+	DurationMs int64
+}
+
+func (e *ExecutionError) Error() string {
+	return e.Message
+}
+
+type loopAction struct {
+	run func()
+}
+
+// ExecutionEnv represents one isolated VM run and provides safe host binding helpers.
+type ExecutionEnv struct {
+	Ctx        context.Context
+	Cwd        string
+	VM         *goja.Runtime
+	loopCh     chan loopAction
+	deliverFn  goja.Callable
+	makeErrFn  goja.Callable
+	opSeq      atomic.Int32
+	maxOps     int
+	onOpStart  func(capability, target string, seq int)
+	tracesMu   sync.Mutex
+	traces     []OpTrace
+	logsMu     sync.Mutex
+	logs       []string
+	logBytes   int
+	pendingOps atomic.Int32
+	cleanupFns []func()
+}
+
+// RegisterCleanup registers a function to run when the VM execution finishes (e.g. rolling back uncommitted transactions).
+func (env *ExecutionEnv) RegisterCleanup(fn func()) {
+	env.cleanupFns = append(env.cleanupFns, fn)
+}
+
+// SetNamespace creates or replaces a global object with the given async and sync methods.
+func (env *ExecutionEnv) SetNamespace(ns string, asyncMethods map[string]AsyncHostFunc, syncMethods map[string]SyncHostFunc) error {
+	obj := env.VM.NewObject()
+	for name, fn := range asyncMethods {
+		fullCap := ns + "." + name
+		bound := env.wrapAsync(fullCap, fn)
+		if err := obj.Set(name, bound); err != nil {
+			return err
+		}
+	}
+	for name, fn := range syncMethods {
+		fullCap := ns + "." + name
+		bound := env.wrapSync(fullCap, fn)
+		if err := obj.Set(name, bound); err != nil {
+			return err
+		}
+	}
+	return env.VM.Set(ns, obj)
+}
+
+func (env *ExecutionEnv) wrapSync(capability string, fn SyncHostFunc) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		seq := int(env.opSeq.Add(1))
+		if seq > env.maxOps {
+			panic(env.VM.NewGoError(fmt.Errorf("OpBudgetError: program exceeded maximum host operations (%d)", env.maxOps)))
+		}
+		exported := exportArgs(call.Arguments)
+		target := summarizeTarget(exported)
+		if env.onOpStart != nil {
+			env.onOpStart(capability, target, seq)
+		}
+		start := time.Now()
+		res, err := fn(env.Ctx, exported)
+		dur := time.Since(start).Milliseconds()
+		if err != nil {
+			env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "error", Error: err.Error()})
+			panic(env.newJSHostError(capability, err.Error()))
+		}
+		env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok"})
+		return env.toJSValue(res)
+	}
+}
+
+func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		seq := int(env.opSeq.Add(1))
+		if seq > env.maxOps {
+			promise, _, reject := env.VM.NewPromise()
+			errVal := env.newJSHostError(capability, fmt.Sprintf("OpBudgetError: program exceeded maximum host operations (%d)", env.maxOps))
+			_ = reject(errVal)
+			_, _ = env.deliverFn(goja.Undefined())
+			return env.VM.ToValue(promise)
+		}
+		exported := exportArgs(call.Arguments)
+		target := summarizeTarget(exported)
+		if env.onOpStart != nil {
+			env.onOpStart(capability, target, seq)
+		}
+
+		promise, resolve, reject := env.VM.NewPromise()
+		env.pendingOps.Add(1)
+		start := time.Now()
+
+		go func() {
+			res, err := fn(env.Ctx, exported)
+			dur := time.Since(start).Milliseconds()
+			if err != nil {
+				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "error", Error: err.Error()})
+			} else {
+				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok"})
+			}
+
+			select {
+			case env.loopCh <- loopAction{
+				run: func() {
+					defer env.pendingOps.Add(-1)
+					if err != nil {
+						errObj := env.newJSHostError(capability, err.Error())
+						_ = reject(errObj)
+						_, _ = env.deliverFn(goja.Undefined())
+						return
+					}
+					val := env.toJSValue(res)
+					_ = resolve(val)
+					_, _ = env.deliverFn(goja.Undefined())
+				},
+			}:
+			case <-env.Ctx.Done():
+				env.pendingOps.Add(-1)
+			}
+		}()
+
+		return env.VM.ToValue(promise)
+	}
+}
+
+func (env *ExecutionEnv) toJSValue(v any) goja.Value {
+	if v == nil {
+		return goja.Null()
+	}
+	// Round-trip structs via JSON into clean plain JS objects/arrays so Object.keys, destructuring, and camelCase JSON tags work seamlessly in TS/JS.
+	switch v.(type) {
+	case string, bool, int, int64, float64, map[string]any, []any:
+		return env.VM.ToValue(v)
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return env.VM.ToValue(v)
+		}
+		var generic any
+		if err := json.Unmarshal(raw, &generic); err != nil {
+			return env.VM.ToValue(v)
+		}
+		return env.VM.ToValue(generic)
+	}
+}
+
+func (env *ExecutionEnv) recordTrace(t OpTrace) {
+	env.tracesMu.Lock()
+	defer env.tracesMu.Unlock()
+	env.traces = append(env.traces, t)
+}
+
+func (env *ExecutionEnv) getTraces() []OpTrace {
+	env.tracesMu.Lock()
+	defer env.tracesMu.Unlock()
+	cp := make([]OpTrace, len(env.traces))
+	copy(cp, env.traces)
+	return cp
+}
+
+func (env *ExecutionEnv) appendLog(level string, args []goja.Value) {
+	env.logsMu.Lock()
+	defer env.logsMu.Unlock()
+	if len(env.logs) >= MaxLogEntries || env.logBytes >= MaxLogBytes {
+		return
+	}
+	parts := make([]string, len(args))
+	for i, a := range args {
+		exp := a.Export()
+		switch val := exp.(type) {
+		case string:
+			parts[i] = val
+		default:
+			if b, err := json.Marshal(val); err == nil {
+				parts[i] = string(b)
+			} else {
+				parts[i] = fmt.Sprintf("%v", val)
+			}
+		}
+	}
+	line := strings.Join(parts, " ")
+	if level != "" && level != "log" {
+		line = "[" + level + "] " + line
+	}
+	if len(line) > 600 {
+		line = line[:600] + "...(truncated)"
+	}
+	env.logs = append(env.logs, line)
+	env.logBytes += len(line)
+}
+
+func (env *ExecutionEnv) getLogs() []string {
+	env.logsMu.Lock()
+	defer env.logsMu.Unlock()
+	cp := make([]string, len(env.logs))
+	copy(cp, env.logs)
+	return cp
+}
+
+// Execute compiles TypeScript code, boots a fresh isolated goja VM, binds capabilities, and awaits completion.
+func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*ExecResult, error) {
+	start := time.Now()
+	cr, err := compiler.Compile(req.Code, req.Payloads)
+	if err != nil {
+		return nil, &ExecutionError{
+			Phase:      "compile",
+			Message:    err.Error(),
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+	}
+
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	if timeout > MaxTimeout {
+		timeout = MaxTimeout
+	}
+	maxOps := req.MaxOps
+	if maxOps <= 0 {
+		maxOps = DefaultMaxOps
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
+	vm := goja.New()
+	vm.SetFieldNameMapper(goja.TagFieldNameMapper("json", true))
+
+	env := &ExecutionEnv{
+		Ctx:       ctx,
+		Cwd:       req.Cwd,
+		VM:        vm,
+		loopCh:    make(chan loopAction, 256),
+		maxOps:    maxOps,
+		onOpStart: req.OnOpStart,
+	}
+	defer func() {
+		for i := len(env.cleanupFns) - 1; i >= 0; i-- {
+			env.cleanupFns[i]()
+		}
+	}()
+
+	// Watchdog goroutine interrupts infinite synchronous CPU loops in JS (`while(true){}`) immediately on deadline.
+	doneWatch := make(chan struct{})
+	defer close(doneWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			vm.Interrupt("execution deadline exceeded")
+		case <-doneWatch:
+		}
+	}()
+
+	deliverVal, err := vm.RunString(`(function __flushMicrotasks() {})`)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap deliver failed: %w", err)
+	}
+	deliverFn, ok := goja.AssertFunction(deliverVal)
+	if !ok {
+		return nil, errors.New("bootstrap deliver is not callable")
+	}
+	env.deliverFn = deliverFn
+
+	makeErrVal, err := vm.RunString(`(function __makeHostError(cap, msg) {
+		const full = cap + ": " + msg;
+		const e = new Error(full);
+		e.name = "HostCapabilityError";
+		e.capability = cap;
+		e.causeMessage = msg;
+		e.toJSON = function() {
+			return { error: full, capability: cap, message: msg };
+		};
+		return e;
+	})`)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap makeHostError failed: %w", err)
+	}
+	makeErrFn, ok := goja.AssertFunction(makeErrVal)
+	if !ok {
+		return nil, errors.New("bootstrap makeHostError is not callable")
+	}
+	env.makeErrFn = makeErrFn
+
+	if err := installConsoleAndTimers(env); err != nil {
+		return nil, err
+	}
+
+	for _, b := range binders {
+		if err := b.Bind(env); err != nil {
+			return nil, fmt.Errorf("bind capability failed: %w", err)
+		}
+	}
+
+	if err := installBootstrapWrappers(vm); err != nil {
+		return nil, err
+	}
+
+	payloadProxy, err := buildPayloadProxy(vm, req.Payloads)
+	if err != nil {
+		return nil, err
+	}
+	_ = vm.Set("π", payloadProxy)
+
+	prog, err := goja.Compile("user_program.ts", cr.JSCode, false)
+	if err != nil {
+		return nil, &ExecutionError{
+			Phase:      "compile",
+			Message:    compiler.FormatRuntimeError(err.Error(), cr),
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+	}
+
+	fnVal, err := vm.RunProgram(prog)
+	if err != nil {
+		return nil, env.wrapRuntimeErr(err, cr, start)
+	}
+	entryFn, ok := goja.AssertFunction(fnVal)
+	if !ok {
+		return nil, &ExecutionError{
+			Phase:      "runtime",
+			Message:    "internal error: compiled wrapper did not produce an entry function",
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+	}
+
+	retVal, err := entryFn(goja.Undefined(), payloadProxy, payloadProxy)
+	if err != nil {
+		return nil, env.wrapRuntimeErr(err, cr, start)
+	}
+
+	promise, ok := retVal.Export().(*goja.Promise)
+	if !ok {
+		return &ExecResult{
+			Value:      retVal.Export(),
+			Logs:       env.getLogs(),
+			Traces:     env.getTraces(),
+			DurationMs: time.Since(start).Milliseconds(),
+		}, nil
+	}
+
+	for promise.State() == goja.PromiseStatePending {
+		if env.pendingOps.Load() == 0 && len(env.loopCh) == 0 {
+			return nil, &ExecutionError{
+				Phase:      "runtime",
+				Message:    "DeadlockError: top-level Promise remained pending with 0 active host operations (check for unresolved new Promise())",
+				Logs:       env.getLogs(),
+				Traces:     env.getTraces(),
+				DurationMs: time.Since(start).Milliseconds(),
+			}
+		}
+		select {
+		case act := <-env.loopCh:
+			act.run()
+		case <-ctx.Done():
+			return nil, &ExecutionError{
+				Phase:      "timeout",
+				Message:    fmt.Sprintf("TimeoutError: program exceeded %s deadline", timeout),
+				Logs:       env.getLogs(),
+				Traces:     env.getTraces(),
+				DurationMs: time.Since(start).Milliseconds(),
+			}
+		}
+	}
+
+	if promise.State() == goja.PromiseStateRejected {
+		rej := promise.Result()
+		msg := formatRejectedValue(vm, rej)
+		return nil, &ExecutionError{
+			Phase:      "runtime",
+			Message:    compiler.FormatRuntimeError(msg, cr),
+			Logs:       env.getLogs(),
+			Traces:     env.getTraces(),
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+	}
+
+	var exported any
+	if res := promise.Result(); res != nil && !goja.IsUndefined(res) {
+		exported = res.Export()
+	}
+	return &ExecResult{
+		Value:      exported,
+		Logs:       env.getLogs(),
+		Traces:     env.getTraces(),
+		DurationMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
+func (env *ExecutionEnv) wrapRuntimeErr(err error, cr *compiler.CompileResult, start time.Time) error {
+	phase := "runtime"
+	var interrupted *goja.InterruptedError
+	if errors.As(err, &interrupted) || errors.Is(env.Ctx.Err(), context.DeadlineExceeded) {
+		phase = "timeout"
+	}
+	return &ExecutionError{
+		Phase:      phase,
+		Message:    compiler.FormatRuntimeError(err.Error(), cr),
+		Logs:       env.getLogs(),
+		Traces:     env.getTraces(),
+		DurationMs: time.Since(start).Milliseconds(),
+	}
+}
+
+func installConsoleAndTimers(env *ExecutionEnv) error {
+	consoleObj := env.VM.NewObject()
+	for _, lvl := range []string{"log", "info", "warn", "error", "debug"} {
+		level := lvl
+		_ = consoleObj.Set(level, func(call goja.FunctionCall) goja.Value {
+			env.appendLog(level, call.Arguments)
+			return goja.Undefined()
+		})
+	}
+	if err := env.VM.Set("console", consoleObj); err != nil {
+		return err
+	}
+	if err := env.VM.Set("print", func(call goja.FunctionCall) goja.Value {
+		env.appendLog("log", call.Arguments)
+		return goja.Undefined()
+	}); err != nil {
+		return err
+	}
+	return env.VM.Set("sleep", env.wrapAsync("sleep", func(ctx context.Context, args []any) (any, error) {
+		ms := 50
+		if len(args) > 0 {
+			switch v := args[0].(type) {
+			case int64:
+				ms = int(v)
+			case float64:
+				ms = int(v)
+			case int:
+				ms = v
+			}
+		}
+		if ms < 0 {
+			ms = 0
+		}
+		if ms > 30000 {
+			ms = 30000
+		}
+		t := time.NewTimer(time.Duration(ms) * time.Millisecond)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}))
+}
+
+func buildPayloadProxy(vm *goja.Runtime, payloads map[string]string) (goja.Value, error) {
+	raw := map[string]any{}
+	for k, v := range payloads {
+		raw[k] = v
+	}
+	_ = vm.Set("__rawPayloads", raw)
+	proxyVal, err := vm.RunString(`(function() {
+		const target = Object.freeze(Object.assign({}, __rawPayloads));
+		delete globalThis.__rawPayloads;
+		const keys = Object.keys(target);
+		return new Proxy(target, {
+			get(t, prop) {
+				if (typeof prop === "symbol" || prop === "then" || prop === "toJSON" || prop in Object.prototype) {
+					return t[prop];
+				}
+				if (!(prop in t)) {
+					throw new Error("PayloadError: key '" + String(prop) + "' does not exist in payloads. Provided keys: " + (keys.length ? keys.join(", ") : "(none)"));
+				}
+				return t[prop];
+			}
+		});
+	})()`)
+	return proxyVal, err
+}
+
+// newJSHostError creates a genuine JavaScript Error instance with .message, .stack, and .toJSON()
+// so both uncaught rejections and `catch (e) { JSON.stringify(e) }` produce clear diagnostic strings instead of `[object Object]` or `{}`.
+func (env *ExecutionEnv) newJSHostError(capability, msg string) goja.Value {
+	if env.makeErrFn != nil {
+		if val, err := env.makeErrFn(goja.Undefined(), env.VM.ToValue(capability), env.VM.ToValue(msg)); err == nil {
+			return val
+		}
+	}
+	return env.VM.ToValue(capability + ": " + msg)
+}
+
+// installBootstrapWrappers adds ergonomic JS facades over raw host namespaces:
+// 1. `mcp.<server>.<tool>(args)` dynamic Proxy routing to `mcp.call("server/tool", args)`
+// 2. `tx.begin()` returning a first-class handle `{ id, edit, write, verify, commit, rollback }`
+// 3. Common LLM method aliases (`fs.readFile` -> `fs.read`, `search.grep` -> `search.rg`, etc.) + clear `UnknownMethodError` listing valid methods!
+func installBootstrapWrappers(vm *goja.Runtime) error {
+	_, err := vm.RunString(`(function() {
+		if (typeof globalThis.mcp === "object" && globalThis.mcp !== null) {
+			const baseMcp = globalThis.mcp;
+			globalThis.mcp = new Proxy(baseMcp, {
+				get(target, serverProp) {
+					if (typeof serverProp !== "string" || serverProp in target || serverProp === "then") {
+						return target[serverProp];
+					}
+					return new Proxy({}, {
+						get(_, toolProp) {
+							if (typeof toolProp !== "string" || toolProp === "then") return undefined;
+							return (args) => baseMcp.call(serverProp + "/" + toolProp, args || {});
+						}
+					});
+				}
+			});
+		}
+		if (typeof globalThis.tx === "object" && globalThis.tx !== null && typeof globalThis.tx._begin === "function") {
+			const rawTx = globalThis.tx;
+			globalThis.tx = {
+				begin: async () => {
+					const info = await rawTx._begin();
+					const id = info.id;
+					return {
+						id,
+						edit: (pathOrSpec, hunks) => rawTx._edit(id, pathOrSpec, hunks),
+						write: (path, content) => rawTx._write(id, path, content),
+						verify: (commands, opts) => rawTx._verify(id, commands, opts || {}),
+						commit: () => rawTx._commit(id),
+						rollback: () => rawTx._rollback(id),
+						status: () => rawTx._status(id),
+					};
+				}
+			};
+		}
+
+		const aliasMap = {
+			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list" },
+			search: { grep: "rg", find: "glob", files: "glob" },
+			ast: { symbols: "outline", parse: "outline" },
+			edit: { edit: "apply", patch: "apply" },
+			sh: { run: "exec", bash: "exec", pwsh: "exec", check: "checks" },
+			state: { load: "get", store: "set", del: "delete", remove: "delete" },
+		};
+
+		for (const ns of ["fs", "search", "ast", "edit", "tx", "git", "sh", "state", "tools"]) {
+			const base = globalThis[ns];
+			if (typeof base !== "object" || base === null) continue;
+			const aliases = aliasMap[ns] || {};
+			const validKeys = Object.keys(base).filter((k) => !k.startsWith("_")).sort();
+			globalThis[ns] = new Proxy(base, {
+				get(t, prop) {
+					if (typeof prop !== "string" || prop === "then" || prop === "toJSON" || prop in Object.prototype) {
+						return t[prop];
+					}
+					if (prop in t) return t[prop];
+					if (prop in aliases) return t[aliases[prop]];
+					throw new Error("UnknownMethodError: '" + ns + "." + prop + "' does not exist. Available methods on '" + ns + "': " + validKeys.join(", "));
+				}
+			});
+		}
+	})()`)
+	return err
+}
+
+func formatRejectedValue(vm *goja.Runtime, rej goja.Value) string {
+	if rej == nil || goja.IsUndefined(rej) || goja.IsNull(rej) {
+		return "Promise rejected with undefined"
+	}
+	if obj := rej.ToObject(vm); obj != nil {
+		var msgStr, stackStr string
+		if m := obj.Get("message"); m != nil && !goja.IsUndefined(m) && !goja.IsNull(m) {
+			msgStr = strings.TrimSpace(m.String())
+		}
+		if s := obj.Get("stack"); s != nil && !goja.IsUndefined(s) && !goja.IsNull(s) {
+			stackStr = strings.TrimSpace(s.String())
+		}
+		if stackStr != "" {
+			if msgStr != "" && !strings.Contains(stackStr, msgStr) {
+				return msgStr + "\n" + stackStr
+			}
+			return stackStr
+		}
+		if msgStr != "" {
+			return msgStr
+		}
+		if b, err := json.Marshal(rej.Export()); err == nil && string(b) != "{}" && string(b) != "null" {
+			return string(b)
+		}
+	}
+	s := rej.String()
+	if s == "[object Object]" {
+		if b, err := json.Marshal(rej.Export()); err == nil {
+			return string(b)
+		}
+	}
+	return s
+}
+
+func exportArgs(vals []goja.Value) []any {
+	out := make([]any, len(vals))
+	for i, v := range vals {
+		if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+			out[i] = nil
+		} else {
+			out[i] = v.Export()
+		}
+	}
+	return out
+}
+
+func summarizeTarget(args []any) string {
+	if len(args) == 0 || args[0] == nil {
+		return ""
+	}
+	switch v := args[0].(type) {
+	case string:
+		if len(v) > 80 {
+			return v[:80] + "..."
+		}
+		return v
+	case map[string]any:
+		for _, k := range []string{"path", "pattern", "command", "query", "ref", "name"} {
+			if s, ok := v[k].(string); ok && s != "" {
+				if len(s) > 80 {
+					return s[:80] + "..."
+				}
+				return s
+			}
+		}
+	}
+	return ""
+}

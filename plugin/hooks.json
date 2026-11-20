@@ -1,0 +1,11 @@
+{
+  "agy-ptc-snapshot": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ./scripts/launch.mjs hook session-start",
+        "timeout": 5
+      }
+    ]
+  }
+}

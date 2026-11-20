@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "ptc": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/scripts/launch.mjs",
+        "mcp",
+        "--data-dir",
+        "${PLUGIN_DATA}"
+      ],
+      "timeoutSeconds": 300,
+      "tools": {
+        "exec": {
+          "eager": true
+        }
+      }
+    }
+  }
+}
