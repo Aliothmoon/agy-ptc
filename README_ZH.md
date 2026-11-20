@@ -39,7 +39,7 @@ flowchart LR
     VM --> SH["git.* & sh.*\n(15s 快速校验 + 递归进程树清理)"]
     VM --> MCP["tools.* & mcp.*\n(零启动开销外部 MCP 桥接)"]
     VM --> ST["state.*\n(跨回合会话状态存储)"]
-    VM -->|"<= 8,800 B UTF-8\n(零 output.txt 溢出)"| Agent
+    VM -->|"<= 9,600 B UTF-8\n(零 output.txt 溢出)"| Agent
 ```
 
 ### 快慢任务黄金分工（与原生 `/tasks` 及 `rtk` 无缝协同）
@@ -56,7 +56,7 @@ flowchart LR
 
 ### 环境要求
 
-- **Go** `1.25+`（从源码编译时使用）
+- **Go** `1.27+`（从源码编译时使用，以 `go.mod` 为准）
 - **Antigravity CLI (`agy`)** `1.5+`（系统 `PATH` 中需有 `node` 用于跨平台启动脚本）
 - **`ripgrep` (`rg`)** *（可选但推荐；若未安装 `rg`，`AgyPTC` 会自动降级到内置纯 Go 正则搜索引擎）*
 
@@ -111,7 +111,7 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 
 ## 沙箱 TypeScript API 速查
 
-`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。沙箱内已内置常用标准全局工具（`Buffer`、`btoa`/`atob`、`TextEncoder`/`TextDecoder`、`path`、`crypto`、`URL`/`URLSearchParams`），无需额外 `import`。调用时请始终传入当前工作区根目录 `cwd`。
+`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。沙箱内已内置常用标准全局工具（`Buffer`、`btoa`/`atob`、`TextEncoder`/`TextDecoder`、`path`、`crypto`、`URL`/`URLSearchParams`、`setTimeout`/`clearTimeout`、`structuredClone`），无需额外 `import`。调用时请始终传入当前工作区根目录 `cwd`。
 
 ### 多行代码块传参（`P` / `payloads`）
 将多行替换代码或模板放在顶层参数 `payloads: { newCode: "..." }` 中，在 `code` 内通过 `P.newCode` 读取，彻底避免多层 JSON 转义报错；若引用了不存在的 `P.<key>`，编译预检会在**零副作用**前提下直接精准报错。
@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, lineNumbers? })`（单文件上限 2 MB）· `fs.write(path, content)` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content)` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })`
 - `search.glob(pattern, { path?, maxResults? })`（支持 `{a,b}` 花括号展开与容错回退）
 - **跨目录 / 外部路径支持**：相对路径始终基于 `cwd` 解析；在策略允许下（默认开启），所有模块均支持直接传入工作区外的绝对路径或 `../` 跨仓路径（如 `D:/OtherRepo/...`）。
@@ -178,7 +178,12 @@ const [status, log] = await Promise.all([
 // 默认 settle: true（非零退出码返回 { ok: false, exitCode, timedOut, output }）
 const vet = await sh.exec("go vet ./...", { timeoutSec: 15, compact: true });
 const checks = await sh.checks(["go vet ./...", "go test ./internal/compiler/..."]);
+
+// 不经过 shell（无引号/方言问题），stdout 与 stderr 分开：{ ok, exitCode, timedOut, stdout, stderr, durationMs }
+const pkgs = await sh.run("go", ["list", "-json", "./..."], { env: { GOFLAGS: "-mod=mod" } });
 ```
+
+编辑辅助：hunk 的 `nth` 指定替换第 N 处匹配（类似 `sed s/x/y/N`）；`edit.apply({ ..., dryRun: true })` 返回 `.diff`，`await t.diff()` 返回事务的统一 diff（基于 `git diff --no-index`，需要 `PATH` 中有 `git`）。
 
 ### 跨回合状态（`state.*`）与外部 MCP 桥接（`tools.*`、`mcp.*`）
 ```ts
@@ -192,6 +197,16 @@ if (found.length > 0) {
 }
 ```
 - 当脚本返回值超过 `9,600` UTF-8 字节（支持通过 `maxOutputBytes` 按需放开）时，`AgyPTC` 会优先自动切换为紧凑无缩进 JSON；若仍超限，则内联返回首尾摘要并自动将完整对象存入 `state.get("__last_result")`（及编号键 `__result_N`），下一回合可直接在内存中切片读取。
+
+### 错误
+宿主操作失败会抛出 JS `Error`：`name` 为语义化类型，`message` 为单行 `"op: detail"`；未捕获时会指向出错的用户代码行（`at code:N  <源码>`）：
+
+```text
+Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2, L6); set nth, startLine/endLine, or replaceAll: true
+  at code:4  await t.edit("src/lib.rs", hunks);
+```
+
+`e.name`：`NotFound` · `NoMatch` · `Ambiguous` · `NeedsApproval` · `Denied` · `Timeout` · `BadArgs` · `CmdFailed` · `Error`。`e.data` 携带结构化细节（如 `{ lines: [2, 6] }`）；`JSON.stringify(e)` 输出同一行文本。结果被截断时（`search.rg`、`search.glob`、`fs.list`、`fs.tree`、`ast.outlines`）会在 `Warnings:` 中提示一次。
 
 ---
 
@@ -231,9 +246,21 @@ agy-ptc uninstall                      # 卸载全局或项目级 agy-ptc 插件
 
 ## 安全与权限边界
 
-- **对齐宿主权限配置**：自动读取 `~/.gemini/antigravity-cli/settings.json`（严格遵循 `Deny > Ask > Allow`）。如需强制禁止访问当前工作区以外的任何路径，可设置环境变量 `AGY_PTC_STRICT_WORKSPACE=1` 或在 `settings.json` 中配置 `"allowNonWorkspaceAccess": false`。
-- **符号链接与凭据保护**：通过 `filepath.EvalSymlinks` 校验真实路径，无条件拦截敏感目录与凭据文件（`~/.ssh`、`~/.gnupg`、`~/.aws`、`mcp_oauth_tokens.json`、`.git/hooks` 及系统核心目录）。
-- **高危命令升级确认**：`git push`、`git reset --hard`、`rm -rf`、`sudo` 等高危命令不会在沙箱内静默执行，而是返回 `APPROVAL_REQUIRED`，引导模型升级至宿主原生 `run_command` 交由用户交互式确认。
+> **定位说明**：AgyPTC 的策略层是**防止模型误操作的护栏，而不是安全边界**。`sh.exec` 会把命令交给真实 shell（`sh -c` / `pwsh` / `cmd`）执行，借助解释器（`node -e`、`python -c`）、混淆或间接调用总能绕过模式匹配。面对不可信代码或提示词，请在操作系统层面隔离（容器 / 虚拟机 / 受限用户）。
+
+- **对齐宿主权限配置**：自动读取 `~/.gemini/antigravity-cli/settings.json`。命令判定顺序为 `用户 Deny > 内置护栏 > 用户 Ask > 用户 Allow`（`command(*)` 通配放行无法绕过内置护栏）；`mcp(server/tool)` 的 `ask` 规则同样抛出 `NeedsApproval`。如需强制禁止访问工作区以外的路径，可设置 `AGY_PTC_STRICT_WORKSPACE=1` 或配置 `"allowNonWorkspaceAccess": false`。
+- **凭据保护（禁止读写）**：基于符号链接解析后的真实路径，拦截 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker/config.json`、`~/.git-credentials`、`~/.netrc`、`~/.npmrc`、`~/.pypirc`、`~/.config/gh`、`~/.config/gcloud`、`~/.azure`、Cargo 凭据、Gemini `oauth_creds.json` / `mcp_oauth_tokens.json`、`.git/hooks`、`.git/config` 及系统目录。
+- **防自我提权（写入需确认）**：`fs.write` / `edit.*` / `tx.*` 不会改写 Agent 权限与 MCP 配置（家目录**或**工作区中 `.gemini` / `.claude` / `.agents` / `.codex` / `.cursor` 下的 `settings*.json`、`mcp_config.json`、`mcp.json`、`policy.json`、`hooks.json`、`config.toml`）、已安装的插件本体（`~/.gemini/config/plugins/**`、`$PLUGIN_ROOT`）、shell 启动文件（`~/.bashrc`、`~/.zshrc`、`~/.profile`、PowerShell `$PROFILE` 等）以及 `~/.gitconfig`。
+- **内置命令护栏**：分类参考 Netcatty AI 默认命令黑名单的 shell 族分组（规则按 Go RE2 独立重写）。命中的命令不会执行，而是抛出带规则名的 `NeedsApproval`，引导模型升级到原生 `run_command`：
+  - 任意写法的递归强制删除（`rm -rf` / `-fr` / `-r -f` / `--recursive --force`、`Remove-Item -Recurse -Force`、`rd /s`、`del /s`、`find -delete`）；
+  - 会发布或丢弃工作的 git 操作（`push`、`reset --hard`、`clean -f`、`checkout -- .`、`restore <工作区>`、`switch --discard-changes`、`stash drop/clear`、`branch -D`、`filter-branch`、`reflog expire`、`gc --prune`、`config --global` 写入）；
+  - 磁盘 / 设备 / 电源 / 系统文件（`mkfs`、`dd of=/dev/...`、`diskpart`、`format C:`、`shutdown`、`> /etc/...`、`chmod -R 777 /`、fork bomb）；
+  - 远程或混淆代码执行（`curl ... | sh`、`iwr ... | iex`、`base64 -d | sh`、`eval`、`Invoke-Expression`、`pwsh -EncodedCommand`、`Set-ExecutionPolicy Bypass`）；
+  - 对外发布 / 基础设施变更（`npm publish`、`cargo publish`、`docker push`、`gh pr merge`、`kubectl delete`、`terraform apply`）；
+  - 凭据访问与经 shell 的自我提权（`cat ~/.ssh/...`、`>> ~/.bashrc`、写 `.gemini` / `.claude` 配置），以及 `sudo` / `su` / `doas`。
+- **只读 `git.*`**：`branch` / `tag` 只接受列表类选项（按模式过滤须加 `--list`）；`remote` 仅允许 `-v`、`show`、`get-url`；拒绝 `--output`、`--ext-diff`、`--exec*`、`--upload-pack`。
+- **工作区 MCP 配置默认不受信任**：`<workspace>/.agents/mcp_config.json` 可以声明任意 `command`，因此默认忽略；如需启用，设置 `AGY_PTC_TRUST_WORKSPACE_MCP=1` 或在 `~/.gemini/config/agy-ptc/policy.json` 中配置 `"agyPtcTrustWorkspaceMcp": true`。全局 `~/.gemini/config/mcp_config.json` 始终生效。
+- **如实上报回滚结果**：回滚会对短暂的文件锁重试；仍无法恢复的文件会被报告（`tx.rollback()` 返回 `ok: false, status: "rollback_incomplete", failedFiles`），未提交 `tx` 的自动回滚也会出现在响应的 `Warnings:` 段中。`tx` 之外的多文件 `edit.apply` 若中途写入失败，会撤销本次已写入的文件。注意：`t.verify()` 中命令（如 `gofmt -w`、代码生成）改动的文件**不在**快照范围内。
 
 ---
 
@@ -247,7 +274,7 @@ AgyPTC/
 │   ├── sandbox/             # 隔离 goja VM、异步 Goroutine -> 微任务事件循环、超时看门狗与操作预算
 │   ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, 外部 MCP 桥接与跨平台进程树管控
 │   ├── policy/              # 真实路径解析、敏感文件防护与 settings.json 权限规则引擎
-│   ├── output/              # <= 8,800 B UTF-8 注水法字节预算器与终端 ANSI/噪声清洗
+│   ├── output/              # <= 9,600 B UTF-8 注水法字节预算器与终端 ANSI/噪声清洗
 │   ├── runtime/             # 核心引擎编排、工作区 cwd 安全解析、超限自动转存 state 与实时状态输出
 │   ├── mcpserver/           # Stdio JSON-RPC 2.0 MCP 服务端（同时支持 NDJSON 与 Content-Length 帧）
 │   ├── snapshot/            # <= 1.5 KB SessionStart 工作区快照钩子与 TUI 状态栏渲染

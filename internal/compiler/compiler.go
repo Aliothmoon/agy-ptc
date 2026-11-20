@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/evanw/esbuild/pkg/api"
 )
@@ -28,6 +29,9 @@ type CompileResult struct {
 	JSCode     string
 	SourceMap  []byte
 	SourceLine []string
+
+	lineMapOnce sync.Once
+	lineMap     map[int]int
 }
 
 // CompileError describes a static syntax or payload preflight error with 1-based user source lines.

@@ -61,6 +61,7 @@ type OpTrace struct {
 	Target     string `json:"target,omitempty"`
 	DurationMs int64  `json:"durationMs"`
 	Status     string `json:"status"` // "ok" | "error"
+	Kind       string `json:"kind,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
 
@@ -92,6 +93,7 @@ type ExecResult struct {
 	Value      any       `json:"value"`
 	HasValue   bool      `json:"hasValue,omitempty"`
 	Logs       []string  `json:"logs,omitempty"`
+	Warnings   []string  `json:"warnings,omitempty"`
 	Traces     []OpTrace `json:"traces,omitempty"`
 	DurationMs int64     `json:"durationMs"`
 }
@@ -102,6 +104,7 @@ type ExecutionError struct {
 	Message     string
 	TimedOutOps []string
 	Logs        []string
+	Warnings    []string
 	Traces      []OpTrace
 	DurationMs  int64
 }
@@ -142,25 +145,83 @@ type ExecutionEnv struct {
 	logBytes   int
 	pendingOps atomic.Int32
 	cleanupFns []func()
+	warnMu     sync.Mutex
+	warnings   []string
+	warnCount  map[string]int
+	compiled   *compiler.CompileResult
+	asyncErr   error // VM-thread only: first exception thrown outside the main promise chain (timer callbacks)
 }
 
 // RegisterCleanup registers a function to run when the VM execution finishes (e.g. rolling back uncommitted transactions).
+// Cleanup functions may call AddWarning; warnings are attached to the returned ExecResult / ExecutionError.
 func (env *ExecutionEnv) RegisterCleanup(fn func()) {
 	env.cleanupFns = append(env.cleanupFns, fn)
+}
+
+// AddWarning records a host-side notice that must reach the model even when the program succeeded
+// (e.g. an uncommitted transaction was auto-rolled back, or a rollback could not restore a file).
+// Identical messages are collapsed into one line with a `(×N)` suffix.
+func (env *ExecutionEnv) AddWarning(msg string) {
+	env.warnMu.Lock()
+	defer env.warnMu.Unlock()
+	if env.warnCount == nil {
+		env.warnCount = map[string]int{}
+	}
+	if env.warnCount[msg] == 0 {
+		env.warnings = append(env.warnings, msg)
+	}
+	env.warnCount[msg]++
+}
+
+func (env *ExecutionEnv) getWarnings() []string {
+	env.warnMu.Lock()
+	defer env.warnMu.Unlock()
+	if len(env.warnings) == 0 {
+		return nil
+	}
+	out := make([]string, len(env.warnings))
+	for i, w := range env.warnings {
+		if n := env.warnCount[w]; n > 1 {
+			w = fmt.Sprintf("%s (×%d)", w, n)
+		}
+		out[i] = w
+	}
+	return out
+}
+
+// userCallSite returns the user source line of the innermost user frame on the current JS stack (0 if none).
+// Host calls are invoked synchronously from guest code, so this pins async failures to the line that issued them.
+func (env *ExecutionEnv) userCallSite() int {
+	if env.compiled == nil {
+		return 0
+	}
+	for _, f := range env.VM.CaptureCallStack(8, nil) {
+		if f.SrcName() == compiler.ProgramName {
+			return env.compiled.UserLine(f.Position().Line)
+		}
+	}
+	return 0
+}
+
+// hostFailure converts a Go error into a trace entry and a guest JS error object.
+func (env *ExecutionEnv) hostFailure(seq int, capability, target string, dur int64, line int, err error) (OpTrace, func() goja.Value) {
+	kind, msg, data := env.classifyHostError(err)
+	tr := OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "error", Kind: kind, Error: msg}
+	return tr, func() goja.Value { return env.newJSHostError(kind, capability, msg, line, data) }
 }
 
 // SetNamespace creates or replaces a global object with the given async and sync methods.
 func (env *ExecutionEnv) SetNamespace(ns string, asyncMethods map[string]AsyncHostFunc, syncMethods map[string]SyncHostFunc) error {
 	obj := env.VM.NewObject()
 	for name, fn := range asyncMethods {
-		fullCap := ns + "." + name
+		fullCap := PublicOpName(ns + "." + name)
 		bound := env.wrapAsync(fullCap, fn)
 		if err := obj.Set(name, bound); err != nil {
 			return err
 		}
 	}
 	for name, fn := range syncMethods {
-		fullCap := ns + "." + name
+		fullCap := PublicOpName(ns + "." + name)
 		bound := env.wrapSync(fullCap, fn)
 		if err := obj.Set(name, bound); err != nil {
 			return err
@@ -172,8 +233,9 @@ func (env *ExecutionEnv) SetNamespace(ns string, asyncMethods map[string]AsyncHo
 func (env *ExecutionEnv) wrapSync(capability string, fn SyncHostFunc) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		seq := int(env.opSeq.Add(1))
+		line := env.userCallSite()
 		if seq > env.maxOps {
-			panic(env.VM.NewGoError(fmt.Errorf("OpBudgetError: program exceeded maximum host operations (%d)", env.maxOps)))
+			panic(env.newJSHostError(KindError, capability, opBudgetMessage(env.maxOps), line, nil))
 		}
 		exported := exportArgs(call.Arguments)
 		target := summarizeTarget(exported)
@@ -184,8 +246,9 @@ func (env *ExecutionEnv) wrapSync(capability string, fn SyncHostFunc) func(goja.
 		res, err := fn(env.Ctx, exported)
 		dur := time.Since(start).Milliseconds()
 		if err != nil {
-			env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "error", Error: err.Error()})
-			panic(env.newJSHostError(capability, err.Error()))
+			tr, jsErr := env.hostFailure(seq, capability, target, dur, line, err)
+			env.recordTrace(tr)
+			panic(jsErr())
 		}
 		env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok"})
 		return env.toJSValue(res)
@@ -195,9 +258,10 @@ func (env *ExecutionEnv) wrapSync(capability string, fn SyncHostFunc) func(goja.
 func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		seq := int(env.opSeq.Add(1))
+		line := env.userCallSite()
 		if seq > env.maxOps {
 			promise, _, reject := env.VM.NewPromise()
-			errVal := env.newJSHostError(capability, fmt.Sprintf("OpBudgetError: program exceeded maximum host operations (%d)", env.maxOps))
+			errVal := env.newJSHostError(KindError, capability, opBudgetMessage(env.maxOps), line, nil)
 			_ = reject(errVal)
 			_, _ = env.deliverFn(goja.Undefined())
 			return env.VM.ToValue(promise)
@@ -219,8 +283,11 @@ func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goj
 			res, err := fn(env.Ctx, exported)
 			dur := time.Since(start).Milliseconds()
 			env.trackInFlightDone(seq)
+			var jsErr func() goja.Value
 			if err != nil {
-				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "error", Error: err.Error()})
+				var tr OpTrace
+				tr, jsErr = env.hostFailure(seq, capability, target, dur, line, err)
+				env.recordTrace(tr)
 			} else {
 				env.recordTrace(OpTrace{Seq: seq, Capability: capability, Target: target, DurationMs: dur, Status: "ok"})
 			}
@@ -230,8 +297,7 @@ func (env *ExecutionEnv) wrapAsync(capability string, fn AsyncHostFunc) func(goj
 				run: func() {
 					defer env.pendingOps.Add(-1)
 					if err != nil {
-						errObj := env.newJSHostError(capability, err.Error())
-						_ = reject(errObj)
+						_ = reject(jsErr())
 						_, _ = env.deliverFn(goja.Undefined())
 						return
 					}
@@ -305,6 +371,9 @@ func (env *ExecutionEnv) toJSValue(v any) goja.Value {
 	if v == nil {
 		return goja.Null()
 	}
+	if om, ok := v.(*OrderedMap); ok {
+		return env.orderedToJS(om)
+	}
 	// Round-trip structs via JSON into clean plain JS objects/arrays so Object.keys, destructuring, and camelCase JSON tags work seamlessly in TS/JS.
 	switch v.(type) {
 	case string, bool, int, int64, float64, map[string]any, []any:
@@ -352,6 +421,10 @@ func (env *ExecutionEnv) appendLog(level string, args []goja.Value) {
 			parts[i] = "null"
 			continue
 		}
+		if obj, ok := a.(*goja.Object); ok && obj.ClassName() == "Error" {
+			parts[i] = a.String()
+			continue
+		}
 		exp := a.Export()
 		switch val := exp.(type) {
 		case string:
@@ -388,7 +461,7 @@ func (env *ExecutionEnv) getLogs() []string {
 }
 
 // Execute compiles TypeScript code, boots a fresh isolated goja VM, binds capabilities, and awaits completion.
-func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*ExecResult, error) {
+func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (result *ExecResult, retErr error) {
 	start := time.Now()
 	cr, err := compiler.Compile(req.Code, req.Payloads)
 	if err != nil {
@@ -425,6 +498,7 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		maxOps:    maxOps,
 		onOpStart: req.OnOpStart,
 		inFlight:  map[int]inFlightEntry{},
+		compiled:  cr,
 	}
 	// Crucial teardown order on exit:
 	// 1) cancel() kills all child process trees via cmd.Cancel()
@@ -435,6 +509,15 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		env.waitAsyncDrain(800 * time.Millisecond)
 		for i := len(env.cleanupFns) - 1; i >= 0; i-- {
 			env.cleanupFns[i]()
+		}
+		if ws := env.getWarnings(); len(ws) > 0 {
+			if result != nil {
+				result.Warnings = ws
+			}
+			var ee *ExecutionError
+			if errors.As(retErr, &ee) {
+				ee.Warnings = ws
+			}
 		}
 	}()
 
@@ -459,15 +542,17 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 	}
 	env.deliverFn = deliverFn
 
-	makeErrVal, err := vm.RunString(`(function __makeHostError(cap, msg) {
-		const full = cap + ": " + msg;
-		const e = new Error(full);
-		e.name = "HostCapabilityError";
-		e.capability = cap;
-		e.causeMessage = msg;
-		e.toJSON = function() {
-			return { error: full, capability: cap, message: msg };
-		};
+	// Guest-visible host error: `name` = semantic kind, `message` = "op: detail" (one line), `data` = optional details.
+	// Enumerable {name, message, data} so returned/logged errors serialize compactly; toJSON yields the same one-liner.
+	// `stack` points at the user line that issued the call instead of this internal factory frame.
+	makeErrVal, err := vm.RunString(`(function __makeHostError(name, op, msg, line, data) {
+		const e = new Error(op + ": " + msg);
+		Object.defineProperty(e, "name", { value: name, enumerable: true, writable: true, configurable: true });
+		Object.defineProperty(e, "message", { value: e.message, enumerable: true, writable: true, configurable: true });
+		Object.defineProperty(e, "op", { value: op, writable: true, configurable: true });
+		if (data) e.data = data;
+		Object.defineProperty(e, "stack", { value: name + ": " + e.message + (line > 0 ? "\n    at code:" + line : ""), writable: true, configurable: true });
+		Object.defineProperty(e, "toJSON", { value: function () { return this.name + ": " + this.message; }, configurable: true });
 		return e;
 	})`)
 	if err != nil {
@@ -483,6 +568,9 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		return nil, err
 	}
 	if err := installStandardGlobals(env); err != nil {
+		return nil, err
+	}
+	if err := installTimers(env); err != nil {
 		return nil, err
 	}
 
@@ -559,6 +647,10 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		select {
 		case act := <-env.loopCh:
 			act.run()
+			if env.asyncErr != nil {
+				cancel()
+				return nil, env.wrapRuntimeErr(env.asyncErr, cr, start)
+			}
 		case <-ctx.Done():
 			snapInFlight := env.snapshotInFlight()
 			cancel()
@@ -580,7 +672,7 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 			}
 			return nil, &ExecutionError{
 				Phase:       "timeout",
-				Message:     fmt.Sprintf("TimeoutError: program exceeded %s deadline (timeoutMs=%d; max=%d)", timeout, timeout.Milliseconds(), EffectiveMaxTimeout().Milliseconds()),
+				Message:     fmt.Sprintf("Timeout: program exceeded %s (timeoutMs=%d, max %d)", timeout, timeout.Milliseconds(), EffectiveMaxTimeout().Milliseconds()),
 				TimedOutOps: culprits,
 				Logs:        env.getLogs(),
 				Traces:      env.getTraces(),
@@ -605,6 +697,7 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 		}
 		formattedMsg := compiler.FormatRuntimeError(msg, cr)
 		formattedMsg = enrichUnknownMethodError(vm, formattedMsg, cr)
+		formattedMsg = compiler.CleanStack(formattedMsg, cr)
 		return nil, &ExecutionError{
 			Phase:      "runtime",
 			Message:    formattedMsg,
@@ -639,6 +732,7 @@ func (env *ExecutionEnv) wrapRuntimeErr(err error, cr *compiler.CompileResult, s
 	if phase == "runtime" {
 		formattedMsg = enrichUnknownMethodError(env.VM, formattedMsg, cr)
 	}
+	formattedMsg = compiler.CleanStack(formattedMsg, cr)
 	return &ExecutionError{
 		Phase:       phase,
 		Message:     formattedMsg,
@@ -723,13 +817,21 @@ func buildPayloadProxy(vm *goja.Runtime, payloads map[string]string) (goja.Value
 
 // newJSHostError creates a genuine JavaScript Error instance with .message, .stack, and .toJSON()
 // so both uncaught rejections and `catch (e) { JSON.stringify(e) }` produce clear diagnostic strings instead of `[object Object]` or `{}`.
-func (env *ExecutionEnv) newJSHostError(capability, msg string) goja.Value {
+func (env *ExecutionEnv) newJSHostError(kind, capability, msg string, line int, data map[string]any) goja.Value {
 	if env.makeErrFn != nil {
-		if val, err := env.makeErrFn(goja.Undefined(), env.VM.ToValue(capability), env.VM.ToValue(msg)); err == nil {
+		dataVal := goja.Undefined()
+		if len(data) > 0 {
+			dataVal = env.toJSValue(data)
+		}
+		if val, err := env.makeErrFn(goja.Undefined(), env.VM.ToValue(kind), env.VM.ToValue(capability), env.VM.ToValue(msg), env.VM.ToValue(line), dataVal); err == nil {
 			return val
 		}
 	}
-	return env.VM.ToValue(capability + ": " + msg)
+	return env.VM.ToValue(kind + ": " + capability + ": " + msg)
+}
+
+func opBudgetMessage(maxOps int) string {
+	return fmt.Sprintf("op budget exceeded (%d host calls); batch work (e.g. ast.outlines, sh.checks) or split the program", maxOps)
 }
 
 // installBootstrapWrappers adds ergonomic JS facades over raw host namespaces:
@@ -767,6 +869,7 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 						verify: (commands, opts) => rawTx._verify(id, commands, opts || {}),
 						commit: () => rawTx._commit(id),
 						rollback: () => rawTx._rollback(id),
+						diff: () => rawTx._diff(id),
 						status: () => rawTx._status(id),
 					};
 				}
@@ -774,11 +877,11 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 		}
 
 		const aliasMap = {
-			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list" },
+			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list", readMany: "cat", readFiles: "cat" },
 			search: { grep: "rg", find: "glob", files: "glob" },
 			ast: { symbols: "outline", parse: "outline" },
 			edit: { edit: "apply", patch: "apply" },
-			sh: { run: "exec", bash: "exec", pwsh: "exec", check: "checks" },
+			sh: { bash: "exec", pwsh: "exec", check: "checks", execFile: "run", spawn: "run" },
 			state: { load: "get", store: "set", del: "delete", remove: "delete" },
 		};
 

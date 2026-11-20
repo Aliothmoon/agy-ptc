@@ -99,7 +99,7 @@ func (e *Engine) SetClientWorkspace(ws string) {
 	e.mu.Unlock()
 }
 
-// RunMCPExec executes a PTC TypeScript program and returns an inline-safe (`<= 8,800 B` UTF-8) formatted response.
+// RunMCPExec executes a PTC TypeScript program and returns an inline-safe (`<= 9,600 B` UTF-8 by default) formatted response.
 func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isError bool) {
 	cwd, cwdErr := e.resolveEffectiveCwd(in.Cwd)
 	if cwdErr != nil {
@@ -193,6 +193,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 				PayloadKeys:   audit.PayloadKeyLengths(in.Payloads),
 				Traces:        ee.Traces,
 				Logs:          ee.Logs,
+				Warnings:      ee.Warnings,
 				Code:          in.Code,
 			})
 			e.writeLiveStatus(LiveStatus{
@@ -250,6 +251,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 		PayloadKeys:   audit.PayloadKeyLengths(in.Payloads),
 		Traces:        res.Traces,
 		Logs:          res.Logs,
+		Warnings:      res.Warnings,
 		Code:          in.Code,
 		ResultPreview: formatted,
 	})
@@ -390,6 +392,28 @@ func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateSto
 	if maxOutBytes <= 0 {
 		maxOutBytes = output.DefaultInlineMaxBytes
 	}
+	warn := formatWarnings(res.Warnings)
+	if warn == "" {
+		return formatSuccessBody(res, store, maxOutBytes)
+	}
+	// Host warnings (auto-rolled-back / un-restorable tx files) must never be truncated away:
+	// reserve their bytes first, then place them right under the header line.
+	body, spilled := formatSuccessBody(res, store, max(1600, maxOutBytes-len(warn)-2))
+	if i := strings.Index(body, "\n\n"); i >= 0 {
+		return body[:i] + "\n\n" + warn + body[i:], spilled
+	}
+	return body + "\n\n" + warn, spilled
+}
+
+// formatWarnings renders host warnings as a compact section, capped so it can never crowd out the result.
+func formatWarnings(ws []string) string {
+	if len(ws) == 0 {
+		return ""
+	}
+	return output.TruncateWithByteNotice("Warnings:\n  - "+strings.Join(ws, "\n  - "), 1600)
+}
+
+func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, maxOutBytes int) (string, bool) {
 	header := fmt.Sprintf("[ptc ok | %d host ops | %dms]", len(res.Traces), res.DurationMs)
 	var sections []string
 	sections = append(sections, header)
@@ -526,9 +550,12 @@ func formatErrorEnvelope(ee *sandbox.ExecutionError, maxOutBytes int) string {
 	if maxOutBytes <= 0 {
 		maxOutBytes = output.DefaultInlineMaxBytes
 	}
-	header := fmt.Sprintf("[ptc %s error | %d ops run | %dms]\n%s", ee.Phase, len(ee.Traces), ee.DurationMs, ee.Message)
+	header := fmt.Sprintf("[ptc %s error | %d ops | %dms]\n%s", ee.Phase, len(ee.Traces), ee.DurationMs, ee.Message)
 	var sections []string
 	sections = append(sections, output.TruncateWithByteNotice(header, max(5400, maxOutBytes*2/3)))
+	if warn := formatWarnings(ee.Warnings); warn != "" {
+		sections = append(sections, warn)
+	}
 
 	if ee.Phase == "timeout" {
 		var culprits []string
@@ -536,40 +563,30 @@ func formatErrorEnvelope(ee *sandbox.ExecutionError, maxOutBytes int) string {
 			culprits = append(culprits, "  - "+op)
 		}
 		for _, t := range ee.Traces {
-			if t.Status == "error" && (strings.Contains(strings.ToUpper(t.Error), "TIMED OUT") || strings.Contains(strings.ToLower(t.Error), "deadline") || strings.Contains(strings.ToLower(t.Error), "canceled")) {
-				item := fmt.Sprintf("#%d %s", t.Seq, t.Capability)
-				if t.Target != "" {
-					item += "(" + t.Target + ")"
-				}
-				errPreview := output.TruncateWithByteNotice(t.Error, 900)
-				culprits = append(culprits, fmt.Sprintf("  - %s [%dms]: %s", item, t.DurationMs, errPreview))
+			low := strings.ToLower(t.Error)
+			if t.Status == "error" && (t.Kind == sandbox.KindTimeout || strings.Contains(low, "timed out") || strings.Contains(low, "deadline") || strings.Contains(low, "canceled")) {
+				culprits = append(culprits, fmt.Sprintf("  - %s [%dms]: %s", opLabel(t), t.DurationMs, output.TruncateWithByteNotice(t.Error, 300)))
 			}
 		}
 		if len(culprits) > 0 {
-			sections = append(sections, "Interrupted / timed-out operations (child process trees terminated):\n"+strings.Join(culprits, "\n"))
+			sections = append(sections, "Interrupted (process trees killed):\n"+strings.Join(culprits, "\n"))
 		}
-		sections = append(sections, "Timeout recovery hint:\n  Keep mcp_agy-ptc_vm_exec fast (<15s). Pass a larger `timeoutMs` (up to 120000) for moderate checks, or use built-in `run_command` (`WaitMsBeforeAsync: 500..2000` / `IsDaemon: true`) + `manage_task` for >15s builds, full test suites, and dev servers.")
+		sections = append(sections, "Hint: raise timeoutMs (max 120000) or run long jobs via native run_command + manage_task.")
 	}
 
-	// Like pi-fabric: list completed host calls before failure so the model doesn't blindly repeat non-idempotent side effects!
-	if len(ee.Traces) > 0 {
-		var completed []string
-		for _, t := range ee.Traces {
-			if t.Status == "ok" {
-				item := t.Capability
-				if t.Target != "" {
-					item += "(" + t.Target + ")"
-				}
-				completed = append(completed, item)
-			}
+	// Only ops that may have changed state are listed, so the model does not blindly repeat them;
+	// read-only ops are omitted to save tokens, and tx rollbacks are reported under Warnings.
+	var effects []string
+	for _, t := range ee.Traces {
+		if t.Status == "ok" && sandbox.IsSideEffectOp(t.Capability) {
+			effects = append(effects, opLabel(t))
 		}
-		if len(completed) > 0 {
-			if len(completed) > 20 {
-				extra := len(completed) - 20
-				completed = append(completed[:20], fmt.Sprintf("...+%d more", extra))
-			}
-			sections = append(sections, "Completed ops before error (note: uncommitted tx.* changes were auto-rolled back):\n  "+strings.Join(completed, ", "))
+	}
+	if len(effects) > 0 {
+		if len(effects) > 10 {
+			effects = append(effects[:10], fmt.Sprintf("+%d more", len(effects)-10))
 		}
+		sections = append(sections, "Side effects before error: "+strings.Join(effects, ", "))
 	}
 
 	if len(ee.Logs) > 0 {
@@ -577,4 +594,11 @@ func formatErrorEnvelope(ee *sandbox.ExecutionError, maxOutBytes int) string {
 	}
 
 	return output.FitSectionsToByteBudget(sections, maxOutBytes, "\n\n")
+}
+
+func opLabel(t sandbox.OpTrace) string {
+	if t.Target == "" {
+		return t.Capability
+	}
+	return t.Capability + "(" + t.Target + ")"
 }

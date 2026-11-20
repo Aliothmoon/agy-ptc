@@ -60,6 +60,7 @@ func (b *ASTBinder) Bind(env *sandbox.ExecutionEnv) error {
 				return []FileOutline{}, nil
 			}
 			if len(paths) > 50 {
+				env.AddWarning(fmt.Sprintf("ast.outlines: only first 50 of %d files outlined; call again for the rest", len(paths)))
 				paths = paths[:50]
 			}
 			results := make([]FileOutline, len(paths))

@@ -39,7 +39,7 @@ flowchart LR
     VM --> SH["git.* & sh.*\n(15s Fast Checks + Process-Tree Kill)"]
     VM --> MCP["tools.* & mcp.*\n(Zero-Startup External MCP Bridge)"]
     VM --> ST["state.*\n(Cross-Turn Session Store)"]
-    VM -->|"<= 8,800 B UTF-8\n(Zero output.txt Spill)"| Agent
+    VM -->|"<= 9,600 B UTF-8\n(Zero output.txt Spill)"| Agent
 ```
 
 ### Smart Fast / Slow Task Division
@@ -56,7 +56,7 @@ flowchart LR
 
 ### Prerequisites
 
-- **Go** `1.25+` (to build from source)
+- **Go** `1.27+` (to build from source; see `go.mod`)
 - **Antigravity CLI (`agy`)** `1.5+` (with `node` available on `PATH` for cross-platform plugin launch)
 - **`ripgrep` (`rg`)** *(optional, recommended — `AgyPTC` automatically falls back to a built-in pure-Go regex engine if `rg` is absent)*
 
@@ -111,7 +111,7 @@ Allow `mcp(agy-ptc_vm/exec)` so PTC runs without repetitive approval prompts, an
 
 ## Sandbox TypeScript API Reference
 
-`code` is compiled as the body of an `async` TypeScript function (`top-level await` and `return` work directly; `import type` is stripped cleanly). Standard zero-I/O utilities (`Buffer`, `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path`, `crypto`, `URL`/`URLSearchParams`) are available globally out of the box. Always pass the active project root in `cwd`.
+`code` is compiled as the body of an `async` TypeScript function (`top-level await` and `return` work directly; `import type` is stripped cleanly). Standard zero-I/O utilities (`Buffer`, `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `path`, `crypto`, `URL`/`URLSearchParams`, `setTimeout`/`clearTimeout`, `structuredClone`) are available globally out of the box. Always pass the active project root in `cwd`.
 
 ### Payloads (`P` / `payloads`)
 Pass multiline replacement blocks or templates via top-level `payloads: { afterCode: "..." }` and read them via `P.afterCode` inside `code`—avoiding nested JSON escaping errors. Missing `P.<key>` references fail preflight **before** any host operation executes.
@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.write(path, content)` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content)` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults? })`
 - `search.glob(pattern, { path?, maxResults? })` (supports `{a,b}` braces + automatic fallback recovery)
 - **External Paths**: Relative paths resolve against `cwd`; external non-sensitive paths (`D:/OtherRepo/...`, `../shared/...`) are also supported across all capabilities unless disabled by policy.
@@ -178,7 +178,12 @@ const [status, log] = await Promise.all([
 // settle: true by default (non-zero exit returns { ok: false, exitCode, timedOut, output })
 const vet = await sh.exec("go vet ./...", { timeoutSec: 15, compact: true });
 const checks = await sh.checks(["go vet ./...", "go test ./internal/compiler/..."]);
+
+// No shell (no quoting/dialect issues), separate streams: { ok, exitCode, timedOut, stdout, stderr, durationMs }
+const pkgs = await sh.run("go", ["list", "-json", "./..."], { env: { GOFLAGS: "-mod=mod" } });
 ```
+
+Edit helpers: hunk `nth` picks the Nth match (like `sed s/x/y/N`); `edit.apply({ ..., dryRun: true })` returns `.diff` and `await t.diff()` returns the tx's unified diff (via `git diff --no-index`, so `git` must be on `PATH`).
 
 ### Cross-Turn Session State (`state.*`) & External MCP Bridge (`tools.*`, `mcp.*`)
 ```ts
@@ -192,6 +197,16 @@ if (found.length > 0) {
 }
 ```
 - If a return value exceeds `9,600` UTF-8 bytes (or custom `maxOutputBytes`), `AgyPTC` automatically compacts JSON whitespace first, and if still larger, returns a head+tail preview inline while storing the full object in `state.get("__last_result")` (and `state.get("__result_N")`) for zero-cost slicing in the next turn.
+
+### Errors
+Host failures throw a JS `Error` with a semantic `name` and a one-line `message` (`"op: detail"`); uncaught ones point at your line (`at code:N  <source>`):
+
+```text
+Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2, L6); set nth, startLine/endLine, or replaceAll: true
+  at code:4  await t.edit("src/lib.rs", hunks);
+```
+
+`e.name`: `NotFound` · `NoMatch` · `Ambiguous` · `NeedsApproval` · `Denied` · `Timeout` · `BadArgs` · `CmdFailed` · `Error`. `e.data` carries details (e.g. `{ lines: [2, 6] }`); `JSON.stringify(e)` yields the same one-liner. Truncated results (`search.rg`, `search.glob`, `fs.list`, `fs.tree`, `ast.outlines`) are reported once under `Warnings:`.
 
 ---
 
@@ -231,9 +246,21 @@ agy-ptc uninstall                      # Cleanly remove global/project plugin in
 
 ## Security & Policy Boundaries
 
-- **Settings-Aligned Permissions**: Reads `~/.gemini/antigravity-cli/settings.json` (`Deny > Ask > Allow`). Set `AGY_PTC_STRICT_WORKSPACE=1` (or `"allowNonWorkspaceAccess": false`) to strictly block all paths outside `cwd`.
-- **Symlink & Credential Guards**: Resolves symlinks via `filepath.EvalSymlinks` and unconditionally blocks sensitive paths (`~/.ssh`, `~/.gnupg`, `~/.aws`, Antigravity `mcp_oauth_tokens.json`, `.git/hooks`, system OS directories).
-- **Destructive Command Gate**: Commands such as `git push`, `git reset --hard`, `rm -rf`, `sudo`, etc. are never executed silently inside `sh.exec`; they return `APPROVAL_REQUIRED` so the agent escalates to native `run_command` for explicit user confirmation.
+> **Scope**: AgyPTC's policy layer is a **guardrail against accidental damage by the model, not a security boundary**. `sh.exec` hands the command line to a real shell (`sh -c` / `pwsh` / `cmd`), so interpreters (`node -e`, `python -c`), obfuscation or indirection can always bypass pattern matching. For untrusted code or prompts, isolate at the OS level (container / VM / restricted user).
+
+- **Settings-Aligned Permissions**: Reads `~/.gemini/antigravity-cli/settings.json`. For commands the order is `user Deny > built-in guard > user Ask > user Allow` (a wildcard `command(*)` allow never bypasses the built-in guard); `mcp(server/tool)` `ask` rules also throw `NeedsApproval`. Set `AGY_PTC_STRICT_WORKSPACE=1` (or `"allowNonWorkspaceAccess": false`) to strictly block all paths outside `cwd`.
+- **Credential Guards (read + write denied)**: Symlink-resolved checks block `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, Cargo credentials, Gemini `oauth_creds.json` / `mcp_oauth_tokens.json`, `.git/hooks`, `.git/config` and system directories.
+- **Self-Escalation Guard (writes require approval)**: `fs.write` / `edit.*` / `tx.*` never rewrite agent permission & MCP configs (`settings*.json`, `mcp_config.json`, `mcp.json`, `policy.json`, `hooks.json`, `config.toml` under `.gemini` / `.claude` / `.agents` / `.codex` / `.cursor`, in home **or** workspace), the installed plugin (`~/.gemini/config/plugins/**`, `$PLUGIN_ROOT`), shell startup files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, PowerShell `$PROFILE`, ...) or `~/.gitconfig`.
+- **Built-in Command Guard**: categories follow the shell-family grouping of Netcatty's AI command blocklist (patterns rewritten independently for Go RE2). Matching commands are not run; they throw `NeedsApproval` with the matched rule name so the agent escalates to native `run_command`:
+  - recursive force deletion in any spelling (`rm -rf` / `-fr` / `-r -f` / `--recursive --force`, `Remove-Item -Recurse -Force`, `rd /s`, `del /s`, `find -delete`);
+  - git operations that publish or discard work (`push`, `reset --hard`, `clean -f`, `checkout -- .`, `restore <worktree>`, `switch --discard-changes`, `stash drop/clear`, `branch -D`, `filter-branch`, `reflog expire`, `gc --prune`, `config --global` writes);
+  - disks / devices / power / system files (`mkfs`, `dd of=/dev/...`, `diskpart`, `format C:`, `shutdown`, `> /etc/...`, `chmod -R 777 /`, fork bombs);
+  - remote or obfuscated code execution (`curl ... | sh`, `iwr ... | iex`, `base64 -d | sh`, `eval`, `Invoke-Expression`, `pwsh -EncodedCommand`, `Set-ExecutionPolicy Bypass`);
+  - outward-facing publish / infra mutation (`npm publish`, `cargo publish`, `docker push`, `gh pr merge`, `kubectl delete`, `terraform apply`);
+  - credential access and shell-side self-escalation (`cat ~/.ssh/...`, `>> ~/.bashrc`, writing `.gemini` / `.claude` configs), plus `sudo` / `su` / `doas`.
+- **Read-Only `git.*`**: `branch` / `tag` only accept listing options (positional patterns require `--list`); `remote` only allows `-v`, `show`, `get-url`; `--output`, `--ext-diff`, `--exec*`, `--upload-pack` are rejected.
+- **Workspace MCP Config Is Untrusted**: `<workspace>/.agents/mcp_config.json` can declare arbitrary `command`s, so it is ignored unless you opt in with `AGY_PTC_TRUST_WORKSPACE_MCP=1` or `"agyPtcTrustWorkspaceMcp": true` in `~/.gemini/config/agy-ptc/policy.json`. The global `~/.gemini/config/mcp_config.json` is always honored.
+- **Honest Rollback Reporting**: rollback retries transient file locks; files that still cannot be restored are reported (`tx.rollback()` returns `ok: false, status: "rollback_incomplete", failedFiles`), and every auto-rollback of an uncommitted `tx` is surfaced in a `Warnings:` section of the response. Multi-file `edit.apply` outside a `tx` undoes earlier writes if a later write fails. Files changed by commands run in `t.verify()` (e.g. `gofmt -w`, codegen) are **not** part of the snapshot.
 
 ---
 
@@ -247,7 +274,7 @@ AgyPTC/
 │   ├── sandbox/             # Isolated goja VM, async goroutine -> microtask loop, watchdog & op budget
 │   ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, external mcp bridge & process-tree control
 │   ├── policy/              # Symlink resolution, credential guards & settings.json rule evaluator
-│   ├── output/              # <= 8,800 B UTF-8 water-filling budgeter & terminal noise/ANSI stripper
+│   ├── output/              # <= 9,600 B UTF-8 water-filling budgeter & terminal noise/ANSI stripper
 │   ├── runtime/             # Engine wiring, workspace cwd resolution, auto-spill & live-status writer
 │   ├── mcpserver/           # Stdio JSON-RPC 2.0 MCP server (NDJSON + Content-Length framing)
 │   ├── snapshot/            # <= 1.5 KB SessionStart workspace snapshot & TUI statusline

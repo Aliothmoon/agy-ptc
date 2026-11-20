@@ -37,6 +37,7 @@ type Entry struct {
 	PayloadKeys   map[string]int    `json:"payloadKeys,omitempty"` // key -> byte length (values omitted for secret safety)
 	Traces        []sandbox.OpTrace `json:"traces,omitempty"`
 	Logs          []string          `json:"logs,omitempty"`
+	Warnings      []string          `json:"warnings,omitempty"`
 	Code          string            `json:"code,omitempty"`
 	ResultPreview string            `json:"resultPreview,omitempty"`
 }
@@ -127,7 +128,8 @@ func ClassifyError(phase, msg string, traces []sandbox.OpTrace) string {
 		return "ts_compile_error"
 	case strings.Contains(low, "unknownmethoderror") || strings.Contains(low, "has no member") || strings.Contains(low, "is not a function"):
 		return "unknown_method_or_type"
-	case strings.Contains(low, "approval_required") || strings.Contains(low, "policy_denied"):
+	case strings.HasPrefix(low, "needsapproval:") || strings.HasPrefix(low, "denied:") ||
+		strings.Contains(low, "approval_required") || strings.Contains(low, "policy_denied"):
 		return "policy_gate"
 	case strings.Contains(low, "target not found") || strings.Contains(low, "matched multiple locations") || strings.Contains(low, "overlapping hunks"):
 		return "edit_hunk_mismatch"
@@ -136,6 +138,20 @@ func ClassifyError(phase, msg string, traces []sandbox.OpTrace) string {
 	}
 	for _, t := range traces {
 		if t.Status == "error" {
+			switch t.Kind {
+			case "NeedsApproval", "Denied":
+				return "policy_gate"
+			case "NoMatch", "Ambiguous":
+				return "edit_hunk_mismatch"
+			case "NotFound":
+				return "not_found"
+			case "Timeout":
+				return "timeout"
+			case "BadArgs":
+				return "bad_args:" + t.Capability
+			case "CmdFailed":
+				return "command_failed"
+			}
 			el := strings.ToLower(t.Error)
 			if strings.Contains(el, "target not found") {
 				return "edit_hunk_mismatch"

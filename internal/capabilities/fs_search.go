@@ -70,6 +70,73 @@ func (b *FSSearchBinder) resolveRg() string {
 	return b.rgBin
 }
 
+// readText implements fs.read for one path (shared by fs.read and fs.cat).
+func (b *FSSearchBinder) readText(cwd, targetPath string, opts map[string]any) (string, error) {
+	absPath, err := b.Policy.ResolveAndCheckRead(cwd, targetPath)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is a directory; use fs.list/fs.tree", targetPath)
+	}
+	startLine := optInt(opts, "startLine", optInt(opts, "offset", 0))
+	endLine := optInt(opts, "endLine", 0)
+	limit := optInt(opts, "limit", 0)
+	hasRange := startLine > 0 || endLine > 0 || limit > 0
+	withNumbers := optBool(opts, "lineNumbers", false)
+	if info.Size() > MaxSandboxReadBytes {
+		if !hasRange {
+			return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is %d bytes (>2MB); pass { startLine, endLine } or use search.rg", targetPath, info.Size())
+		}
+		return readBoundedLineRange(absPath, targetPath, startLine, endLine, limit, withNumbers)
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", err
+	}
+	if bytes.IndexByte(raw, 0) >= 0 || !utf8.Valid(raw) {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is binary", targetPath)
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if withNumbers && !hasRange {
+		lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+		for i, l := range lines {
+			lines[i] = fmt.Sprintf("%d: %s", i+1, l)
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	if hasRange {
+		lines := strings.Split(text, "\n")
+		s := maxInt(1, startLine)
+		e := len(lines)
+		if endLine > 0 && endLine < e {
+			e = endLine
+		} else if limit > 0 && s+limit-1 < e {
+			e = s + limit - 1
+		}
+		if s > len(lines) {
+			return "", nil
+		}
+		if e < s {
+			return "", fmt.Errorf("invalid range: startLine (%d) > endLine (%d)", s, e)
+		}
+		selected := lines[s-1 : e]
+		if withNumbers {
+			numbered := make([]string, len(selected))
+			for i, l := range selected {
+				numbered[i] = fmt.Sprintf("%d: %s", s+i, l)
+			}
+			return strings.Join(numbered, "\n"), nil
+		}
+		return strings.Join(selected, "\n"), nil
+	}
+	return text, nil
+}
+
 func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 	fsAsync := map[string]sandbox.AsyncHostFunc{
 		"read": func(_ context.Context, args []any) (any, error) {
@@ -77,62 +144,51 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			absPath, err := b.Policy.ResolveAndCheckRead(env.Cwd, targetPath)
-			if err != nil {
-				return nil, err
+			return b.readText(env.Cwd, targetPath, opts)
+		},
+		// fs.cat(paths, opts?) reads many files in parallel like `cat a b c`: unreadable files don't abort the call;
+		// they map to null and are listed once under Warnings. Returns { [path]: text | null } in input order.
+		"cat": func(_ context.Context, args []any) (any, error) {
+			if len(args) == 0 || args[0] == nil {
+				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "pass an array of paths")
 			}
-			info, err := os.Stat(absPath)
-			if err != nil {
-				return nil, err
+			paths := extractStringSlice(args[0])
+			var opts map[string]any
+			if len(args) > 1 {
+				opts, _ = args[1].(map[string]any)
 			}
-			if info.IsDir() {
-				return nil, fmt.Errorf("path '%s' is a directory; use fs.list() or fs.tree()", targetPath)
+			if len(paths) > maxCatFiles {
+				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "max %d files per call (got %d)", maxCatFiles, len(paths))
 			}
-			startLine := optInt(opts, "startLine", optInt(opts, "offset", 0))
-			endLine := optInt(opts, "endLine", 0)
-			limit := optInt(opts, "limit", 0)
-			hasRange := startLine > 0 || endLine > 0 || limit > 0
-			withNumbers := optBool(opts, "lineNumbers", false)
-			if info.Size() > MaxSandboxReadBytes {
-				if !hasRange {
-					return nil, fmt.Errorf("file '%s' (%d bytes) exceeds 2MB sandbox read cap; use search.rg() or pass { startLine, endLine } to fs.read()", targetPath, info.Size())
+			texts := make([]string, len(paths))
+			errs := make([]error, len(paths))
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, 8)
+			for i, p := range paths {
+				wg.Add(1)
+				go func(i int, p string) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					texts[i], errs[i] = b.readText(env.Cwd, p, opts)
+				}(i, p)
+			}
+			wg.Wait()
+			out := &sandbox.OrderedMap{}
+			var failed []string
+			for i, p := range paths {
+				out.Keys = append(out.Keys, p)
+				if errs[i] != nil {
+					out.Vals = append(out.Vals, nil)
+					failed = append(failed, p+" ("+catFailReason(errs[i])+")")
+					continue
 				}
-				return readBoundedLineRange(absPath, targetPath, startLine, endLine, limit, withNumbers)
+				out.Vals = append(out.Vals, texts[i])
 			}
-			raw, err := os.ReadFile(absPath)
-			if err != nil {
-				return nil, err
+			if len(failed) > 0 {
+				env.AddWarning("fs.cat: null for " + joinLimited(failed, 8))
 			}
-			if bytes.IndexByte(raw, 0) >= 0 || !utf8.Valid(raw) {
-				return nil, fmt.Errorf("file '%s' appears to be binary", targetPath)
-			}
-			text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-			if hasRange {
-				lines := strings.Split(text, "\n")
-				s := maxInt(1, startLine)
-				e := len(lines)
-				if endLine > 0 && endLine < e {
-					e = endLine
-				} else if limit > 0 && s+limit-1 < e {
-					e = s + limit - 1
-				}
-				if s > len(lines) {
-					return "", nil
-				}
-				if e < s {
-					return "", fmt.Errorf("invalid range: startLine (%d) > endLine (%d)", s, e)
-				}
-				selected := lines[s-1 : e]
-				if withNumbers {
-					numbered := make([]string, len(selected))
-					for i, l := range selected {
-						numbered[i] = fmt.Sprintf("%d: %s", s+i, l)
-					}
-					return strings.Join(numbered, "\n"), nil
-				}
-				return strings.Join(selected, "\n"), nil
-			}
-			return text, nil
+			return out, nil
 		},
 		"write": func(_ context.Context, args []any) (any, error) {
 			var targetPath, content string
@@ -156,7 +212,11 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			if err := writeFilePreserveMode(absPath, []byte(content)); err != nil {
+			data := []byte(content)
+			if orig, rErr := os.ReadFile(absPath); rErr == nil {
+				data = keepLineEndings(orig, data)
+			}
+			if err := writeFilePreserveMode(absPath, data); err != nil {
 				return nil, err
 			}
 			return map[string]any{
@@ -218,6 +278,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			items := []map[string]any{}
 			for _, e := range entries {
 				if len(items) >= limit {
+					env.AddWarning(fmt.Sprintf("fs.list: capped at %d entries; pass { limit }", limit))
 					break
 				}
 				info, _ := e.Info()
@@ -258,7 +319,11 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			return buildTreeList(absPath, maxDepth, 300), nil
+			tree := buildTreeList(absPath, maxDepth, treeMaxItems)
+			if len(tree) >= treeMaxItems {
+				env.AddWarning(fmt.Sprintf("fs.tree: capped at %d entries; lower depth or use search.glob", treeMaxItems))
+			}
+			return tree, nil
 		},
 	}
 
@@ -276,7 +341,11 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			return b.runTextOrRegexSearch(ctx, env.Cwd, searchRoot, q)
+			hits, err := b.runTextOrRegexSearch(ctx, env.Cwd, searchRoot, q)
+			if err == nil && len(hits) >= q.maxResults {
+				env.AddWarning(fmt.Sprintf("search.rg: capped at %d hits; narrow path/glob or pass { maxResults }", q.maxResults))
+			}
+			return hits, err
 		},
 		"glob": func(ctx context.Context, args []any) (any, error) {
 			pat, opts, err := parsePatternAndOpts(args)
@@ -299,6 +368,9 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
+			if len(files) >= maxResults {
+				env.AddWarning(fmt.Sprintf("search.glob: capped at %d files; narrow path or pass { maxResults }", maxResults))
+			}
 			if optBool(opts, "withMeta", false) {
 				return map[string]any{"files": files, "note": note}, nil
 			}
@@ -307,6 +379,12 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 	}
 	return env.SetNamespace("search", searchAsync, nil)
 }
+
+const (
+	maxCatFiles         = 200
+	defaultRgMaxResults = 100
+	treeMaxItems        = 300
+)
 
 type searchQuery struct {
 	pattern       string
@@ -322,7 +400,7 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 	q := searchQuery{
 		path:          ".",
 		caseSensitive: true,
-		maxResults:    100,
+		maxResults:    defaultRgMaxResults,
 	}
 	if len(args) == 0 || args[0] == nil {
 		return q, errors.New("search.rg requires a pattern string or options object")
@@ -361,9 +439,9 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 		if q.contextLines > 5 {
 			q.contextLines = 5
 		}
-		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", 200))
+		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", defaultRgMaxResults))
 		if q.maxResults <= 0 {
-			q.maxResults = 200
+			q.maxResults = defaultRgMaxResults
 		}
 		if q.maxResults > 2000 {
 			q.maxResults = 2000
@@ -814,4 +892,23 @@ func readBoundedLineRange(absPath, targetPath string, startLine, endLine, limit 
 		return "", nil
 	}
 	return strings.Join(selected, "\n"), nil
+}
+
+// catFailReason is a short per-file reason for fs.cat warnings.
+func catFailReason(err error) string {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "not found"
+	case policy.IsApprovalRequired(err):
+		return "needs approval"
+	}
+	var pe *policy.PolicyError
+	if errors.As(err, &pe) {
+		return "denied"
+	}
+	msg := err.Error()
+	if r := []rune(msg); len(r) > 60 {
+		msg = string(r[:60]) + "…"
+	}
+	return msg
 }

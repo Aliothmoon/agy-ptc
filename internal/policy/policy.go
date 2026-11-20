@@ -5,7 +5,6 @@ package policy
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,9 +31,41 @@ type PolicyError struct {
 
 func (e *PolicyError) Error() string {
 	if e.Decision == DecisionAsk {
-		return fmt.Sprintf("APPROVAL_REQUIRED [%s(%s)]: %s (invoke native run_command/edit_file or ask_question so Antigravity CLI can prompt the user)", e.Action, e.Target, e.Reason)
+		return "needs approval: " + e.Detail()
 	}
-	return fmt.Sprintf("POLICY_DENIED [%s(%s)]: %s", e.Action, e.Target, e.Reason)
+	return "denied: " + e.Detail()
+}
+
+// Kind implements sandbox.KindedError: guest code sees `e.name` "NeedsApproval" or "Denied".
+func (e *PolicyError) Kind() string {
+	if e.Decision == DecisionAsk {
+		return "NeedsApproval"
+	}
+	return "Denied"
+}
+
+// Detail is the one-line message without the kind word: `<target> — <reason>[; <how to proceed>]`.
+func (e *PolicyError) Detail() string {
+	d := shortTarget(e.Target) + " — " + e.Reason
+	if e.Decision == DecisionAsk {
+		switch e.Action {
+		case "command":
+			d += "; run it via native run_command"
+		case "mcp":
+			d += "; call the MCP tool natively"
+		default:
+			d += "; use native file tools"
+		}
+	}
+	return d
+}
+
+func shortTarget(t string) string {
+	t = strings.Join(strings.Fields(t), " ")
+	if r := []rune(t); len(r) > 80 {
+		return string(r[:80]) + "…"
+	}
+	return t
 }
 
 // IsApprovalRequired reports whether err indicates an interactive approval gate.
@@ -45,7 +76,9 @@ func IsApprovalRequired(err error) bool {
 
 type cliSettings struct {
 	AllowNonWorkspaceAccess *bool `json:"allowNonWorkspaceAccess"`
-	Permissions             struct {
+	// TrustWorkspaceMCP opts in to spawning MCP servers declared in `<workspace>/.agents/mcp_config.json`.
+	TrustWorkspaceMCP *bool `json:"agyPtcTrustWorkspaceMcp"`
+	Permissions       struct {
 		Allow []string `json:"allow"`
 		Ask   []string `json:"ask"`
 		Deny  []string `json:"deny"`
@@ -63,6 +96,7 @@ type parsedRule struct {
 type Engine struct {
 	workspaceRoots          []string
 	allowNonWorkspaceAccess bool
+	trustWorkspaceMCP       bool
 	denyRules               []parsedRule
 	askRules                []parsedRule
 	allowRules              []parsedRule
@@ -74,6 +108,7 @@ func NewEngine(workspaceDir string, extraRoots ...string) *Engine {
 	e := &Engine{
 		// Default to allowing external non-sensitive paths unless explicitly disabled via settings.json (`"allowNonWorkspaceAccess": false`) or `AGY_PTC_STRICT_WORKSPACE=1`.
 		allowNonWorkspaceAccess: os.Getenv("AGY_PTC_STRICT_WORKSPACE") != "1",
+		trustWorkspaceMCP:       os.Getenv("AGY_PTC_TRUST_WORKSPACE_MCP") == "1",
 	}
 	seen := map[string]bool{}
 	addRoot := func(p string) {
@@ -111,6 +146,9 @@ func NewEngine(workspaceDir string, extraRoots ...string) *Engine {
 		} {
 			e.sensitiveDirs = append(e.sensitiveDirs, filepath.Join(home, rel))
 		}
+		for _, rel := range homeCredentialPaths {
+			e.sensitiveDirs = append(e.sensitiveDirs, filepath.Join(home, rel))
+		}
 		settingsPath := filepath.Join(home, ".gemini", "antigravity-cli", "settings.json")
 		e.loadSettingsFile(settingsPath)
 		e.loadSettingsFile(filepath.Join(home, ".gemini", "config", "agy-ptc", "policy.json"))
@@ -131,9 +169,19 @@ func (e *Engine) LoadSettingsJSON(raw []byte) {
 	if cfg.AllowNonWorkspaceAccess != nil {
 		e.allowNonWorkspaceAccess = *cfg.AllowNonWorkspaceAccess
 	}
+	if cfg.TrustWorkspaceMCP != nil {
+		e.trustWorkspaceMCP = *cfg.TrustWorkspaceMCP
+	}
 	e.denyRules = append(e.denyRules, parseRuleList(cfg.Permissions.Deny)...)
 	e.askRules = append(e.askRules, parseRuleList(cfg.Permissions.Ask)...)
 	e.allowRules = append(e.allowRules, parseRuleList(cfg.Permissions.Allow)...)
+}
+
+// TrustWorkspaceMCP reports whether MCP servers declared in `<workspace>/.agents/mcp_config.json` may be spawned.
+// Off by default: a cloned repository must not be able to make the sandbox launch arbitrary processes.
+// Enable with `AGY_PTC_TRUST_WORKSPACE_MCP=1` or `"agyPtcTrustWorkspaceMcp": true` in an agy-ptc policy.json.
+func (e *Engine) TrustWorkspaceMCP() bool {
+	return e.trustWorkspaceMCP
 }
 
 func (e *Engine) loadSettingsFile(path string) {
@@ -155,12 +203,12 @@ func (e *Engine) ResolveAndCheckRead(baseDir, targetPath string) (string, error)
 			Decision: DecisionDeny,
 			Action:   "read_file",
 			Target:   targetPath,
-			Reason:   "access to sensitive credential directory is blocked",
+			Reason:   "credential path",
 		}
 	}
 	if dec, matched := e.evalRules("read_file", realPath); matched {
 		if dec != DecisionAllow {
-			return "", &PolicyError{Decision: dec, Action: "read_file", Target: targetPath, Reason: "matched CLI permission rule"}
+			return "", &PolicyError{Decision: dec, Action: "read_file", Target: targetPath, Reason: "settings rule"}
 		}
 		return abs, nil
 	}
@@ -173,7 +221,7 @@ func (e *Engine) ResolveAndCheckRead(baseDir, targetPath string) (string, error)
 			Decision: DecisionAsk,
 			Action:   "read_file",
 			Target:   targetPath,
-			Reason:   "reading files outside active workspace requires host approval",
+			Reason:   "outside workspace",
 		}
 	}
 	return abs, nil
@@ -190,16 +238,26 @@ func (e *Engine) ResolveAndCheckWrite(baseDir, targetPath string) (string, error
 			Decision: DecisionDeny,
 			Action:   "write_file",
 			Target:   targetPath,
-			Reason:   "writing to protected system directories, .git internals, or credential paths is blocked",
+			Reason:   "protected system/.git/credential path",
 		}
 	}
 	// Deny read implies deny write.
 	if dec, matched := e.evalRules("read_file", realPath); matched && dec == DecisionDeny {
-		return "", &PolicyError{Decision: DecisionDeny, Action: "write_file", Target: targetPath, Reason: "read_file deny rule blocks write_file"}
+		return "", &PolicyError{Decision: DecisionDeny, Action: "write_file", Target: targetPath, Reason: "read deny rule"}
+	}
+	// Self-escalation guard: agent permission/MCP/hook configs, the plugin itself, shell startup files and
+	// global git config are never rewritten from inside the sandbox (user allow rules cannot override this).
+	if isProtectedConfigPath(realPath) || isProtectedConfigPath(abs) {
+		return "", &PolicyError{
+			Decision: DecisionAsk,
+			Action:   "write_file",
+			Target:   targetPath,
+			Reason:   "protected agent/plugin/shell/git config",
+		}
 	}
 	if dec, matched := e.evalRules("write_file", realPath); matched {
 		if dec != DecisionAllow {
-			return "", &PolicyError{Decision: dec, Action: "write_file", Target: targetPath, Reason: "matched CLI permission rule"}
+			return "", &PolicyError{Decision: dec, Action: "write_file", Target: targetPath, Reason: "settings rule"}
 		}
 		return abs, nil
 	}
@@ -208,7 +266,7 @@ func (e *Engine) ResolveAndCheckWrite(baseDir, targetPath string) (string, error
 			Decision: DecisionAsk,
 			Action:   "write_file",
 			Target:   targetPath,
-			Reason:   "writing outside active workspace is blocked in PTC sandbox",
+			Reason:   "outside workspace",
 		}
 	}
 	return abs, nil
@@ -216,47 +274,28 @@ func (e *Engine) ResolveAndCheckWrite(baseDir, targetPath string) (string, error
 
 var hostPrivEscPattern = regexp.MustCompile(`(?i)(?:^|[;&|(\n` + "`" + `]\s*)(?:env\s+(?:[^\s;|&]+\s+)*)?(?:[a-zA-Z0-9_./\\:-]*[/\\])?(?:sudo|su|doas)\b`)
 
-var destructiveCmdPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:/|~|\.\.|[a-zA-Z]:\\)`),
-	regexp.MustCompile(`(?i)\bRemove-Item\b.*-Recurse.*-Force\s+(?:/|~|\$HOME|\$env:USERPROFILE|[a-zA-Z]:\\$)`),
-	regexp.MustCompile(`(?i)\bgit\s+(?:push\b.*--force|push\b.*-f\b|reset\s+--hard|clean\s+-[a-zA-Z]*f)`),
-	regexp.MustCompile(`(?i)\b(?:mkfs|fdisk|diskpart|shutdown|reboot|halt)\b`),
-	regexp.MustCompile(`(?i)\b(?:curl|wget|irm|Invoke-RestMethod|iwr)\b.*\|\s*(?:sh|bash|zsh|pwsh|powershell|iex)\b`),
-}
-
-// CheckCommand validates a shell command against destructive guards and CLI permission rules.
+// CheckCommand validates a shell command against CLI permission rules and the built-in guard.
+// Order: user deny rules > built-in guard (APPROVAL_REQUIRED) > user ask rules > user allow rules.
+// The built-in guard is a best-effort guardrail, not a security boundary (see guards.go).
 func (e *Engine) CheckCommand(cmdLine string) error {
 	trimmed := strings.TrimSpace(cmdLine)
 	if trimmed == "" {
 		return errors.New("command cannot be empty")
 	}
-	if hostPrivEscPattern.MatchString(extractHostCommandSurface(trimmed, 0)) {
+	dec, matched := e.evalRules("command", trimmed)
+	if matched && dec == DecisionDeny {
+		return &PolicyError{Decision: DecisionDeny, Action: "command", Target: trimmed, Reason: "settings deny rule"}
+	}
+	if guard := matchBuiltinCommandGuard(trimmed); guard != "" {
 		return &PolicyError{
 			Decision: DecisionAsk,
 			Action:   "command",
 			Target:   trimmed,
-			Reason:   "destructive, privilege-escalating, or remote-pipe shell command must go through native interactive approval",
+			Reason:   guard,
 		}
 	}
-	for _, re := range destructiveCmdPatterns {
-		if re.MatchString(trimmed) {
-			return &PolicyError{
-				Decision: DecisionAsk,
-				Action:   "command",
-				Target:   trimmed,
-				Reason:   "destructive, privilege-escalating, or remote-pipe shell command must go through native interactive approval",
-			}
-		}
-	}
-	if dec, matched := e.evalRules("command", trimmed); matched {
-		if dec != DecisionAllow {
-			return &PolicyError{
-				Decision: dec,
-				Action:   "command",
-				Target:   trimmed,
-				Reason:   "matched CLI command permission rule",
-			}
-		}
+	if matched && dec != DecisionAllow {
+		return &PolicyError{Decision: dec, Action: "command", Target: trimmed, Reason: "settings rule"}
 	}
 	return nil
 }
@@ -526,13 +565,12 @@ func isHostShellWrapper(verb string) bool {
 // CheckMCP validates external MCP bridge invocations against mcp(server/tool) rules.
 func (e *Engine) CheckMCP(server, tool string) error {
 	target := server + "/" + tool
-	if dec, matched := e.evalRules("mcp", target); matched && dec == DecisionDeny {
-		return &PolicyError{
-			Decision: DecisionDeny,
-			Action:   "mcp",
-			Target:   target,
-			Reason:   "matched CLI mcp deny rule",
+	if dec, matched := e.evalRules("mcp", target); matched && dec != DecisionAllow {
+		reason := "settings deny rule"
+		if dec == DecisionAsk {
+			reason = "settings ask rule"
 		}
+		return &PolicyError{Decision: dec, Action: "mcp", Target: target, Reason: reason}
 	}
 	return nil
 }

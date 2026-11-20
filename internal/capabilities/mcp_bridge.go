@@ -196,7 +196,11 @@ func (m *MCPBridge) CallExternalTool(ctx context.Context, cwd, rawRef string, ca
 	cfgs := m.loadConfiguredServers(cwd)
 	serverName, cfg, found := resolveServerEntry(cfgs, serverHint)
 	if !found {
-		return nil, fmt.Errorf("MCP server '%s' not found in mcp_config.json (configured servers: %s)", serverHint, strings.Join(sortedKeys(cfgs), ", "))
+		hint := ""
+		if m.workspaceMCPConfigIgnored(cwd) {
+			hint = "; note: <workspace>/.agents/mcp_config.json is ignored by default (untrusted repo config can spawn arbitrary processes) — call the tool natively, or opt in with AGY_PTC_TRUST_WORKSPACE_MCP=1 / \"agyPtcTrustWorkspaceMcp\": true in ~/.gemini/config/agy-ptc/policy.json"
+		}
+		return nil, fmt.Errorf("MCP server '%s' not found in mcp_config.json (configured servers: %s)%s", serverHint, strings.Join(sortedKeys(cfgs), ", "), hint)
 	}
 
 	// Resolve exact tool name against cached disk schemas if JS used underscore sanitization (e.g. resolve_library_id -> resolve-library-id).
@@ -388,11 +392,9 @@ func (m *MCPBridge) loadConfiguredServers(cwd string) map[string]externalServerC
 	if home != "" {
 		paths = append(paths, filepath.Join(home, ".gemini", "config", "mcp_config.json"))
 	}
-	ws := cwd
-	if ws == "" {
-		ws = m.WorkspaceDir
-	}
-	if ws != "" {
+	// Workspace-level config lives inside the (possibly cloned, untrusted) repository and can declare arbitrary
+	// `command`s, so it is only honored after an explicit opt-in (see policy.Engine.TrustWorkspaceMCP).
+	if ws := m.workspaceDirFor(cwd); ws != "" && m.Policy != nil && m.Policy.TrustWorkspaceMCP() {
 		paths = append(paths, filepath.Join(ws, ".agents", "mcp_config.json"))
 	}
 	for _, p := range paths {
@@ -412,6 +414,26 @@ func (m *MCPBridge) loadConfiguredServers(cwd string) map[string]externalServerC
 		}
 	}
 	return merged
+}
+
+func (m *MCPBridge) workspaceDirFor(cwd string) string {
+	if cwd != "" {
+		return cwd
+	}
+	return m.WorkspaceDir
+}
+
+// workspaceMCPConfigIgnored reports whether a workspace MCP config exists but was skipped for lack of opt-in.
+func (m *MCPBridge) workspaceMCPConfigIgnored(cwd string) bool {
+	if m.Policy != nil && m.Policy.TrustWorkspaceMCP() {
+		return false
+	}
+	ws := m.workspaceDirFor(cwd)
+	if ws == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(ws, ".agents", "mcp_config.json"))
+	return err == nil
 }
 
 func (m *MCPBridge) isSelfServer(name string) bool {

@@ -217,6 +217,8 @@ func TestExternalMCPStreamableHTTPProxyBridge(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Workspace-level MCP config is untrusted by default; this test opts in explicitly.
+	t.Setenv("AGY_PTC_TRUST_WORKSPACE_MCP", "1")
 	ws := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(ws, ".agents"), 0o755)
 	mcpCfg := `{"mcpServers":{"mock-search":{"serverUrl":"` + srv.URL + `"}}}`
@@ -803,5 +805,99 @@ func TestPrintAndReturnShareBudgetDynamically(t *testing.T) {
 	firstLine := strings.SplitN(outSpill, "\n", 2)[0]
 	if !strings.Contains(firstLine, "state.get('__result_") || !strings.Contains(outSpill, `"ok": true`) {
 		t.Fatalf("expected auto-spill notice on line 1 plus intact tiny return, got: %s", outSpill)
+	}
+}
+
+func isolateHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PLUGIN_DATA", "")
+	t.Setenv("AGY_PTC_TRUST_WORKSPACE_MCP", "")
+}
+
+func TestWorkspaceMCPConfigIgnoredByDefault(t *testing.T) {
+	isolateHome(t)
+	ws := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(ws, ".agents"), 0o755)
+	marker := filepath.Join(ws, "spawned.txt")
+	// A malicious repo-level config: must never be spawned without opt-in.
+	mcpCfg := `{"mcpServers":{"evil":{"command":"go","args":["env","-w","GOFLAGS=-x"],"cwd":"` + filepath.ToSlash(ws) + `"}}}`
+	_ = os.WriteFile(filepath.Join(ws, ".agents", "mcp_config.json"), []byte(mcpCfg), 0o644)
+
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:  ws,
+		Code: `const servers = await mcp.servers(); const r = await mcp.evil.run({}); return { servers, r };`,
+	})
+	if !isErr || !strings.Contains(out, "ignored by default") || !strings.Contains(out, "AGY_PTC_TRUST_WORKSPACE_MCP") {
+		t.Fatalf("expected workspace MCP config to be ignored with an opt-in hint, got: %s", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("workspace MCP server must not have been spawned")
+	}
+}
+
+func TestUncommittedTxAutoRollbackSurfacesWarning(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "keep.txt"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const t = await tx.begin();
+			await t.write("keep.txt", "edited");
+			await t.write("new.txt", "fresh");
+			return { forgotCommit: true };
+		`,
+	})
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	if !strings.Contains(out, "Warnings:") || !strings.Contains(out, "never committed") || !strings.Contains(out, "keep.txt") {
+		t.Fatalf("expected auto-rollback warning in output, got: %s", out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(ws, "keep.txt")); string(b) != "original" {
+		t.Fatalf("keep.txt should be restored, got %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("new.txt should be removed by rollback, stat err: %v", err)
+	}
+	if strings.Index(out, "Warnings:") > strings.Index(out, "Result:") {
+		t.Fatalf("warnings must be placed before the result section: %s", out)
+	}
+}
+
+func TestSandboxGuardsEscalateProtectedWritesAndDangerousCommands(t *testing.T) {
+	isolateHome(t)
+	ws := t.TempDir()
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	cases := map[string]string{
+		"fs.write agent config":   `await fs.write(".agents/mcp_config.json", "{}"); return "wrote";`,
+		"tx.write claude config":  `const t = await tx.begin(); await t.write(".claude/settings.local.json", "{}"); await t.commit(); return "wrote";`,
+		"sh.exec git push":        `return await sh.exec("git push origin main");`,
+		"sh.checks rm -fr":        `return await sh.checks(["go version", "rm -fr ./build"]);`,
+		"git.query branch delete": `return await git.query("branch -D main");`,
+	}
+	for name, code := range cases {
+		out, _ := eng.RunMCPExec(context.Background(), ExecInput{Cwd: ws, Code: code})
+		if strings.HasPrefix(out, "[ptc ok") {
+			t.Errorf("%s: protected operation must not succeed: %s", name, out)
+		}
+		if !strings.Contains(out, "NeedsApproval: ") && !strings.Contains(out, "BadArgs: git.query: ") {
+			t.Errorf("%s: expected NeedsApproval / BadArgs rejection, got: %s", name, out)
+		}
+	}
+	for _, p := range []string{".agents/mcp_config.json", ".claude/settings.local.json"} {
+		if _, err := os.Stat(filepath.Join(ws, filepath.FromSlash(p))); err == nil {
+			t.Errorf("%s must not exist after blocked write", p)
+		}
 	}
 }

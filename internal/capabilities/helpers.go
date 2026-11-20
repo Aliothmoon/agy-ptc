@@ -3,6 +3,7 @@
 package capabilities
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -186,4 +187,23 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// keepLineEndings preserves an existing file's CRLF style and UTF-8 BOM when overwriting it with LF-only text.
+// fs.read normalizes CRLF to LF, so a read-modify-write would otherwise silently convert the whole file.
+// Content that already contains CRLF is written as-is (explicit intent).
+func keepLineEndings(orig, next []byte) []byte {
+	if len(orig) == 0 || len(next) == 0 {
+		return next
+	}
+	if bytes.HasPrefix(orig, utf8BOM) && !bytes.HasPrefix(next, utf8BOM) {
+		next = append(append([]byte(nil), utf8BOM...), next...)
+	}
+	crlf := bytes.Count(orig, []byte("\r\n"))
+	if crlf > 0 && crlf*2 >= bytes.Count(orig, []byte("\n")) && !bytes.Contains(next, []byte("\r\n")) {
+		next = bytes.ReplaceAll(next, []byte("\n"), []byte("\r\n"))
+	}
+	return next
 }

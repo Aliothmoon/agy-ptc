@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aliothmoon/agy-ptc/internal/policy"
 	"github.com/aliothmoon/agy-ptc/internal/sandbox"
@@ -20,6 +21,7 @@ type EditHunk struct {
 	StartLine   int    `json:"startLine,omitempty"`
 	EndLine     int    `json:"endLine,omitempty"`
 	ReplaceAll  bool   `json:"replaceAll,omitempty"`
+	Nth         int    `json:"nth,omitempty"` // 1-based: replace only the Nth match (like sed s/x/y/N)
 }
 
 // FileEditSpec describes edits or creation for one file.
@@ -67,13 +69,27 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 	txSeq := 0
 	txMap := map[string]*activeTx{}
 
-	// Automatic safety net: any uncommitted transaction at the end of `exec` automatically rolls back!
+	// Automatic safety net: any uncommitted transaction at the end of `exec` automatically rolls back,
+	// and the outcome (including files that could NOT be restored) is surfaced to the model as a warning.
 	env.RegisterCleanup(func() {
 		txMu.Lock()
 		defer txMu.Unlock()
-		for _, tx := range txMap {
-			if !tx.committed && !tx.rolledBack {
-				_ = rollbackSnapshots(tx)
+		ids := make([]string, 0, len(txMap))
+		for id := range txMap {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			tx := txMap[id]
+			if tx.committed || tx.rolledBack {
+				continue
+			}
+			restored, failed := rollbackSnapshots(tx)
+			if len(restored) > 0 {
+				env.AddWarning(fmt.Sprintf("%s was never committed — auto-rolled back %d file(s): %s (call `await t.commit()` to keep tx edits)", id, len(restored), joinLimited(restored, 10)))
+			}
+			if len(failed) > 0 {
+				env.AddWarning(fmt.Sprintf("ROLLBACK FAILED for %s: %s — these files may still contain uncommitted tx edits; inspect them before retrying", id, formatRollbackFailures(failed)))
 			}
 		}
 	})
@@ -119,6 +135,7 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 					StartLine:   optInt(opts, "startLine", 0),
 					EndLine:     optInt(opts, "endLine", 0),
 					ReplaceAll:  optBool(opts, "replaceAll", optBool(opts, "all", false)),
+					Nth:         optInt(opts, "nth", optInt(opts, "occurrence", 0)),
 				}},
 			}
 			return b.applyFileSpecs(env.Cwd, []FileEditSpec{spec}, false, false, nil)
@@ -231,13 +248,38 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if tx.rolledBack {
 				return map[string]any{"ok": true, "id": id, "status": "already_rolled_back"}, nil
 			}
-			restored := rollbackSnapshots(tx)
-			return map[string]any{
-				"ok":            true,
+			restored, failed := rollbackSnapshots(tx)
+			res := map[string]any{
+				"ok":            len(failed) == 0,
 				"id":            id,
 				"status":        "rolled_back",
 				"restoredFiles": restored,
-			}, nil
+			}
+			if len(failed) > 0 {
+				res["status"] = "rollback_incomplete"
+				res["failedFiles"] = failed
+				env.AddWarning(fmt.Sprintf("ROLLBACK FAILED for %s: %s — these files may still contain tx edits", id, formatRollbackFailures(failed)))
+			}
+			return res, nil
+		},
+		// t.diff() -> unified diff of every file touched by the tx (current disk content vs. snapshot).
+		"_diff": func(_ context.Context, args []any) (any, error) {
+			id, _ := requireStringArg(args, 0, "id")
+			txMu.Lock()
+			tx, ok := txMap[id]
+			var files []diffFile
+			if ok {
+				for _, s := range tx.snapshots {
+					cur, err := os.ReadFile(s.absPath)
+					files = append(files, diffFile{rel: s.relPath, before: s.origBytes, after: cur, beforeOK: s.existed, afterOK: err == nil})
+				}
+			}
+			txMu.Unlock()
+			if !ok {
+				return nil, fmt.Errorf("unknown transaction '%s'", id)
+			}
+			sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+			return gitDiff(files)
 		},
 		"_status": func(_ context.Context, args []any) (any, error) {
 			id, _ := requireStringArg(args, 0, "id")
@@ -265,20 +307,94 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 	return env.SetNamespace("tx", txAsync, nil)
 }
 
-func rollbackSnapshots(tx *activeTx) []string {
-	restored := []string{}
+// rollbackSnapshots restores every snapshotted file, retrying briefly (Windows editors, indexers and AV scanners
+// commonly hold transient locks). It reports restored paths and per-file failures instead of claiming success.
+func rollbackSnapshots(tx *activeTx) (restored []string, failed []map[string]any) {
+	restored = []string{}
 	for _, snap := range tx.snapshots {
-		if snap.existed {
-			_ = writeFilePreserveMode(snap.absPath, snap.origBytes)
-		} else {
-			_ = os.Remove(snap.absPath)
+		if err := restoreSnapshot(snap); err != nil {
+			failed = append(failed, map[string]any{"path": snap.relPath, "error": err.Error()})
+			continue
 		}
 		restored = append(restored, snap.relPath)
 	}
 	sort.Strings(restored)
+	sort.Slice(failed, func(i, j int) bool { return failed[i]["path"].(string) < failed[j]["path"].(string) })
 	tx.rolledBack = true
 	tx.committed = false
-	return restored
+	return restored, failed
+}
+
+func restoreSnapshot(snap fileSnapshot) error {
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*75) * time.Millisecond)
+		}
+		if snap.existed {
+			err = writeFilePreserveMode(snap.absPath, snap.origBytes)
+		} else {
+			err = os.Remove(snap.absPath)
+			if errors.Is(err, os.ErrNotExist) {
+				err = nil
+			}
+		}
+		if err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// matchLines returns the 1-based lines of every occurrence of target inside window (which starts at winStart).
+func matchLines(window, target string, winStart int, lineStarts []int) []int {
+	offs := matchOffsets(window, target)
+	lines := make([]int, len(offs))
+	for i, o := range offs {
+		lines[i] = offsetToLineNumber(lineStarts, winStart+o)
+	}
+	return lines
+}
+
+// matchOffsets returns the byte offsets of every non-overlapping occurrence of target in window.
+func matchOffsets(window, target string) []int {
+	var offs []int
+	for off := 0; ; {
+		idx := strings.Index(window[off:], target)
+		if idx < 0 {
+			return offs
+		}
+		offs = append(offs, off+idx)
+		off += idx + len(target)
+	}
+}
+
+// formatLineList renders "L2, L6, L9" (at most limit entries, then "+N").
+func formatLineList(lines []int, limit int) string {
+	parts := make([]string, 0, minInt(len(lines), limit)+1)
+	for i, l := range lines {
+		if i == limit {
+			parts = append(parts, fmt.Sprintf("+%d", len(lines)-limit))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("L%d", l))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatRollbackFailures(failed []map[string]any) string {
+	parts := make([]string, 0, len(failed))
+	for _, f := range failed {
+		parts = append(parts, fmt.Sprintf("%v (%v)", f["path"], f["error"]))
+	}
+	return joinLimited(parts, 10)
+}
+
+func joinLimited(items []string, limit int) string {
+	if len(items) <= limit {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:limit], ", ") + fmt.Sprintf(", ...+%d more", len(items)-limit)
 }
 
 func (b *EditTxBinder) applyFileSpecs(cwd string, specs []FileEditSpec, dryRun, bestEffort bool, tx *activeTx) (map[string]any, error) {
@@ -310,6 +426,7 @@ func (b *EditTxBinder) applyFileSpecs(cwd string, specs []FileEditSpec, dryRun, 
 	}
 
 	if !dryRun {
+		var written []plannedFileWrite
 		for _, pw := range planned {
 			if tx != nil {
 				if _, seen := tx.snapshots[pw.absPath]; !seen {
@@ -323,8 +440,23 @@ func (b *EditTxBinder) applyFileSpecs(cwd string, specs []FileEditSpec, dryRun, 
 				}
 			}
 			if err := writeFilePreserveMode(pw.absPath, pw.newBytes); err != nil {
+				if tx == nil && len(written) > 0 {
+					// Outside a tx, keep multi-file edit.apply all-or-nothing: undo files already written in this call.
+					var undoFailed []map[string]any
+					for i := len(written) - 1; i >= 0; i-- {
+						w := written[i]
+						if uErr := restoreSnapshot(fileSnapshot{absPath: w.absPath, relPath: w.relPath, existed: w.existed, origBytes: w.origBytes}); uErr != nil {
+							undoFailed = append(undoFailed, map[string]any{"path": w.relPath, "error": uErr.Error()})
+						}
+					}
+					if len(undoFailed) > 0 {
+						return nil, fmt.Errorf("failed writing '%s': %w; ALSO failed to undo earlier writes: %s", pw.relPath, err, formatRollbackFailures(undoFailed))
+					}
+					return nil, fmt.Errorf("failed writing '%s': %w (earlier files in this edit.apply call were restored)", pw.relPath, err)
+				}
 				return nil, fmt.Errorf("failed writing '%s': %w", pw.relPath, err)
 			}
+			written = append(written, pw)
 		}
 	}
 
@@ -341,6 +473,17 @@ func (b *EditTxBinder) applyFileSpecs(cwd string, specs []FileEditSpec, dryRun, 
 		"dryRun":  dryRun,
 		"applied": applied,
 	}
+	if dryRun {
+		files := make([]diffFile, len(planned))
+		for i, pw := range planned {
+			files[i] = diffFile{rel: pw.relPath, before: pw.origBytes, after: pw.newBytes, beforeOK: pw.existed, afterOK: true}
+		}
+		if d, err := gitDiff(files); err != nil {
+			res["diffError"] = err.Error()
+		} else {
+			res["diff"] = d
+		}
+	}
 	if len(failures) > 0 {
 		res["failures"] = failures
 	}
@@ -353,9 +496,12 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 
 	if spec.Create != nil {
 		if existed && !spec.Overwrite {
-			return plannedFileWrite{}, fmt.Errorf("file '%s' already exists (pass overwrite: true to replace)", relPath)
+			return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s exists; pass overwrite: true", relPath)
 		}
 		newBytes := []byte(*spec.Create)
+		if existed {
+			newBytes = keepLineEndings(origBytes, newBytes)
+		}
 		oldLines := 0
 		if existed {
 			oldLines = strings.Count(string(origBytes), "\n") + 1
@@ -373,10 +519,10 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 	}
 
 	if !existed {
-		return plannedFileWrite{}, fmt.Errorf("file '%s' does not exist", relPath)
+		return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNotFound, nil, "%s not found", relPath)
 	}
 	if len(spec.Hunks) == 0 {
-		return plannedFileWrite{}, fmt.Errorf("no hunks or create content provided for '%s'", relPath)
+		return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s: no hunks or create content", relPath)
 	}
 
 	rawStr := string(origBytes)
@@ -396,11 +542,11 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 		normTarget := strings.ReplaceAll(h.Target, "\r\n", "\n")
 		normRepl := strings.ReplaceAll(h.Replacement, "\r\n", "\n")
 		if normTarget == "" {
-			return plannedFileWrite{}, fmt.Errorf("%s hunk #%d: target cannot be empty", relPath, hIdx+1)
+			return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s hunk %d: empty target", relPath, hIdx+1)
 		}
 		winStart, winEnd, wErr := lineWindowBounds(normText, lineStarts, h.StartLine, h.EndLine)
 		if wErr != nil {
-			return plannedFileWrite{}, fmt.Errorf("%s hunk #%d: %w", relPath, hIdx+1, wErr)
+			return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s hunk %d: %v", relPath, hIdx+1, wErr)
 		}
 		windowText := normText[winStart:winEnd]
 
@@ -420,7 +566,7 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 			}
 			if count == 0 {
 				hint := closestLineHint(normText, normTarget)
-				return plannedFileWrite{}, fmt.Errorf("%s hunk #%d: target not found%s", relPath, hIdx+1, hint)
+				return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, nil, "%s hunk %d: target not found%s", relPath, hIdx+1, hint)
 			}
 		} else {
 			firstIdx := strings.Index(windowText, normTarget)
@@ -429,16 +575,23 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 				if (h.StartLine > 0 || h.EndLine > 0) && strings.Contains(normText, normTarget) {
 					actualOff := strings.Index(normText, normTarget)
 					actualLine := offsetToLineNumber(lineStarts, actualOff)
-					return plannedFileWrite{}, fmt.Errorf("%s hunk #%d: target not found in lines %d..%d, but exact match exists at line %d", relPath, hIdx+1, h.StartLine, h.EndLine, actualLine)
+					return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, map[string]any{"lines": []int{actualLine}}, "%s hunk %d: target not in L%d-%d; exact match at L%d", relPath, hIdx+1, h.StartLine, h.EndLine, actualLine)
 				}
 				hint := closestLineHint(normText, normTarget)
-				return plannedFileWrite{}, fmt.Errorf("%s hunk #%d: target not found%s", relPath, hIdx+1, hint)
+				return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, nil, "%s hunk %d: target not found%s", relPath, hIdx+1, hint)
 			}
-			secondIdx := strings.Index(windowText[firstIdx+len(normTarget):], normTarget)
-			if secondIdx >= 0 {
-				l1 := offsetToLineNumber(lineStarts, winStart+firstIdx)
-				l2 := offsetToLineNumber(lineStarts, winStart+firstIdx+len(normTarget)+secondIdx)
-				return plannedFileWrite{}, fmt.Errorf("%s hunk #%d: target matched multiple locations (lines %d and %d); pass startLine/endLine or replaceAll: true", relPath, hIdx+1, l1, l2)
+			if h.Nth > 0 {
+				offs := matchOffsets(windowText, normTarget)
+				if h.Nth > len(offs) {
+					lines := matchLines(windowText, normTarget, winStart, lineStarts)
+					return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindNoMatch, map[string]any{"lines": lines},
+						"%s hunk %d: nth %d but only %d match(es) (%s)", relPath, hIdx+1, h.Nth, len(offs), formatLineList(lines, 6))
+				}
+				firstIdx = offs[h.Nth-1]
+			} else if strings.Contains(windowText[firstIdx+len(normTarget):], normTarget) {
+				lines := matchLines(windowText, normTarget, winStart, lineStarts)
+				return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindAmbiguous, map[string]any{"lines": lines},
+					"%s hunk %d: target matches %d places (%s); set nth, startLine/endLine, or replaceAll: true", relPath, hIdx+1, len(lines), formatLineList(lines, 6))
 			}
 			absStart := winStart + firstIdx
 			spans = append(spans, span{start: absStart, end: absStart + len(normTarget), repl: normRepl, idx: hIdx})
@@ -448,7 +601,7 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	for i := 1; i < len(spans); i++ {
 		if spans[i].start < spans[i-1].end {
-			return plannedFileWrite{}, fmt.Errorf("%s: overlapping hunks (#%d and #%d)", relPath, spans[i-1].idx+1, spans[i].idx+1)
+			return plannedFileWrite{}, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s: hunks %d and %d overlap", relPath, spans[i-1].idx+1, spans[i].idx+1)
 		}
 	}
 
@@ -583,17 +736,17 @@ func closestLineHint(fileText, target string) string {
 	if bestIdx < 0 || bestScore < 35 {
 		return ""
 	}
-	from := maxInt(0, bestIdx-2)
-	to := minInt(len(fileLines)-1, bestIdx+minInt(len(targetLines)+1, 8))
+	from := maxInt(0, bestIdx-1)
+	to := minInt(len(fileLines)-1, bestIdx+minInt(len(targetLines), 5))
 	var snip []string
 	for i := from; i <= to; i++ {
 		line := fileLines[i]
-		if len(line) > 150 {
-			line = line[:150] + "..."
+		if len(line) > 120 {
+			line = line[:120] + "…"
 		}
 		snip = append(snip, fmt.Sprintf("    %d: %s", i+1, line))
 	}
-	return fmt.Sprintf(" (closest region lines %d-%d):\n%s", from+1, to+1, strings.Join(snip, "\n"))
+	return fmt.Sprintf("; closest L%d-%d:\n%s", from+1, to+1, strings.Join(snip, "\n"))
 }
 
 func parseEditApplyArgs(args []any) (specs []FileEditSpec, dryRun bool, bestEffort bool, verifyCmd string, err error) {
@@ -743,5 +896,6 @@ func decodeSingleHunk(m map[string]any) (EditHunk, error) {
 		StartLine:   optInt(m, "startLine", 0),
 		EndLine:     optInt(m, "endLine", 0),
 		ReplaceAll:  optBool(m, "replaceAll", optBool(m, "all", false)),
+		Nth:         optInt(m, "nth", optInt(m, "occurrence", 0)),
 	}, nil
 }

@@ -66,6 +66,22 @@ func (b *ShellGitBinder) Bind(env *sandbox.ExecutionEnv) error {
 			}
 			return res, nil
 		},
+		// sh.run(file, args?, opts?) runs a program directly (no shell) -> { ok, exitCode, timedOut, stdout, stderr, durationMs }.
+		"run": func(ctx context.Context, args []any) (any, error) {
+			file, argv, opts, err := parseRunArgs(args)
+			if err != nil {
+				return nil, err
+			}
+			workDir := env.Cwd
+			if subCwd := firstString(opts, "cwd"); subCwd != "" {
+				resolved, rErr := b.Policy.ResolveAndCheckRead(env.Cwd, subCwd)
+				if rErr != nil {
+					return nil, rErr
+				}
+				workDir = resolved
+			}
+			return b.RunArgv(ctx, env, workDir, file, argv, opts)
+		},
 		"checks": func(ctx context.Context, args []any) (any, error) {
 			return b.RunChecksBatch(ctx, env.Cwd, args)
 		},
@@ -307,10 +323,16 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 	}
 
 	if !ok && !settle {
-		return nil, fmt.Errorf("command '%s' failed (exit %d): %s", cmdLine, exitCode, output.TruncateWithByteNotice(formatted, 4000))
+		kind := sandbox.KindCmdFailed
+		if timedOut {
+			kind = sandbox.KindTimeout
+		}
+		return nil, sandbox.NewHostError(kind, map[string]any{"exitCode": exitCode}, "`%s` exit %d: %s", cmdLine, exitCode, output.TruncateWithByteNotice(formatted, 4000))
 	}
 	return envelope, nil
 }
+
+const maxChecksPerCall = 12
 
 type checkSpec struct {
 	name    string
@@ -358,8 +380,9 @@ func (b *ShellGitBinder) RunChecksBatch(ctx context.Context, baseCwd string, arg
 	if len(rawList) == 0 {
 		return nil, errors.New("commands list cannot be empty")
 	}
-	if len(rawList) > 12 {
-		rawList = rawList[:12]
+	if len(rawList) > maxChecksPerCall {
+		// Never drop checks silently: a truncated verify list could let a tx commit with unrun checks.
+		return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "max %d commands per call (got %d); split into batches", maxChecksPerCall, len(rawList))
 	}
 
 	for i, item := range rawList {
@@ -481,34 +504,118 @@ func runReadOnlyGitSoft(ctx context.Context, cwd string, gitArgs []string) (stri
 	return "", err
 }
 
-func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, error) {
+// Read-only option allowlists for git subcommands that ALSO have mutating forms (`git branch -D`, `git tag -d`,
+// `git remote add`). Values map to whether the long option consumes the following argument when no `=` is present.
+var (
+	gitBranchListOpts = map[string]bool{
+		"--all": false, "--remotes": false, "--verbose": false, "--list": false, "--show-current": false,
+		"--ignore-case": false, "--no-color": false, "--no-column": false, "--no-abbrev": false, "--omit-empty": false,
+		"--quiet": false, "--color": false, "--column": false, "--abbrev": false,
+		"--contains": true, "--no-contains": true, "--merged": true, "--no-merged": true, "--points-at": true,
+		"--sort": true, "--format": true,
+	}
+	gitBranchListShort = "arvliq"
+	gitTagListOpts     = map[string]bool{
+		"--list": false, "--ignore-case": false, "--no-color": false, "--no-column": false, "--omit-empty": false,
+		"--color": false, "--column": false,
+		"--contains": true, "--no-contains": true, "--merged": true, "--no-merged": true, "--points-at": true,
+		"--sort": true, "--format": true,
+	}
+	gitTagListShort = "li"
+)
+
+// validateReadOnlyGitArgs rejects any git invocation that could mutate the repository or execute helpers.
+func validateReadOnlyGitArgs(gitArgs []string) error {
 	if len(gitArgs) == 0 {
-		return "", errors.New("git subcommand required")
+		return errors.New("git subcommand required")
 	}
 	// Disallow global git flags like -c core.pager=... or --exec-path before the subcommand
 	sub := gitArgs[0]
 	if strings.HasPrefix(sub, "-") || !allowedGitReadSubcommands[sub] {
-		return "", fmt.Errorf("git subcommand '%s' is not in the read-only allowlist (use sh.exec for write git operations)", sub)
+		return fmt.Errorf("git subcommand '%s' is not in the read-only allowlist (use sh.exec for write git operations)", sub)
 	}
-	if sub == "tag" {
-		hasList := false
-		for _, a := range gitArgs[1:] {
-			if a == "-l" || a == "--list" {
-				hasList = true
+	rest := gitArgs[1:]
+	for _, a := range rest {
+		if strings.HasPrefix(a, "--upload-pack") || strings.HasPrefix(a, "--exec") || strings.HasPrefix(a, "--output") ||
+			strings.HasPrefix(a, "--ext-diff") || strings.HasPrefix(a, "--open-files-in-pager") {
+			return fmt.Errorf("disallowed git flag '%s' in read-only git query", a)
+		}
+	}
+	switch sub {
+	case "branch":
+		return validateListOnlyArgs("branch", rest, gitBranchListOpts, gitBranchListShort, "-l", "--list")
+	case "tag":
+		// `-n<num>` (annotation lines) is list-only too.
+		filtered := make([]string, 0, len(rest))
+		for _, a := range rest {
+			if len(a) >= 2 && strings.HasPrefix(a, "-n") && strings.Trim(a[2:], "0123456789") == "" {
+				continue
 			}
+			filtered = append(filtered, a)
 		}
-		if !hasList && len(gitArgs) > 1 {
-			return "", errors.New("only read-only 'git tag --list' is allowed in git.*")
+		return validateListOnlyArgs("tag", filtered, gitTagListOpts, gitTagListShort, "-l", "--list")
+	case "remote":
+		i := 0
+		for i < len(rest) && (rest[i] == "-v" || rest[i] == "--verbose") {
+			i++
+		}
+		if i == len(rest) || rest[i] == "show" || rest[i] == "get-url" {
+			return nil
+		}
+		return fmt.Errorf("only read-only 'git remote [-v]', 'git remote show' and 'git remote get-url' are allowed in git.* (got '%s')", rest[i])
+	}
+	return nil
+}
+
+// validateListOnlyArgs accepts only listing options; positional arguments (patterns) require explicit list mode,
+// because `git branch <name>` / `git tag <name>` CREATE refs.
+func validateListOnlyArgs(sub string, args []string, longOpts map[string]bool, shortLetters string, listFlags ...string) error {
+	listMode := false
+	var positionals []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			positionals = append(positionals, args[i+1:]...)
+			i = len(args)
+		case strings.HasPrefix(a, "--"):
+			name, _, hasValue := strings.Cut(a, "=")
+			takesValue, ok := longOpts[name]
+			if !ok {
+				return fmt.Errorf("git %s option '%s' is not allowed in read-only git.* (use sh.exec for ref changes)", sub, a)
+			}
+			for _, lf := range listFlags {
+				if name == lf {
+					listMode = true
+				}
+			}
+			if takesValue && !hasValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case strings.HasPrefix(a, "-") && len(a) > 1:
+			for _, c := range a[1:] {
+				if !strings.ContainsRune(shortLetters, c) {
+					return fmt.Errorf("git %s flag '-%c' is not allowed in read-only git.* (use sh.exec for ref changes)", sub, c)
+				}
+				if c == 'l' {
+					listMode = true
+				}
+			}
+		default:
+			positionals = append(positionals, a)
 		}
 	}
-	if sub == "remote" && len(gitArgs) > 1 && gitArgs[1] != "-v" && gitArgs[1] != "show" {
-		return "", errors.New("only read-only 'git remote -v' is allowed in git.*")
+	if len(positionals) > 0 && !listMode {
+		return fmt.Errorf("'git %s %s' would create a ref; pass '--list' to filter by pattern in read-only git.*", sub, strings.Join(positionals, " "))
 	}
-	for _, a := range gitArgs[1:] {
-		if strings.HasPrefix(a, "--upload-pack") || strings.HasPrefix(a, "--exec") || strings.HasPrefix(a, "--output=") {
-			return "", fmt.Errorf("disallowed git flag '%s' in read-only git query", a)
-		}
+	return nil
+}
+
+func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, error) {
+	if err := validateReadOnlyGitArgs(gitArgs); err != nil {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%v", err)
 	}
+	sub := gitArgs[0]
 
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
