@@ -256,10 +256,7 @@ func FormatCommandOutput(p CommandFormatParams) string {
 
 	if !p.Compact {
 		if combined == "" {
-			if p.ExitCode == 0 {
-				return "OK"
-			}
-			return fmt.Sprintf("Exited with code %d", p.ExitCode)
+			return ""
 		}
 		return TruncateHeadTailBytes(combined, maxBytes, "")
 	}

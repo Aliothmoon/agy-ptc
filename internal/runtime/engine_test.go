@@ -681,3 +681,26 @@ func TestNamespaceFeatureDetectionDoesNotThrowWhileDirectCallStillRaisesUnknownM
 		t.Fatalf("expected auto-spill header notice on line 1, got: %s", firstLine)
 	}
 }
+
+func TestShellExecEmptyOutputReturnsEmptyStringNotSyntheticOK(t *testing.T) {
+	ws := t.TempDir()
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const r = await sh.exec("node -e \"\"");
+			const fallback = r.output.trim() || "FALLBACK_USED";
+			return { ok: r.ok, rawEmpty: r.output === "", fallback };
+		`,
+	})
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	for _, needle := range []string{`"ok": true`, `"rawEmpty": true`, `"fallback": "FALLBACK_USED"`} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("expected %q in output, got: %s", needle, out)
+		}
+	}
+}
