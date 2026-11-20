@@ -10,13 +10,13 @@
 
 `AgyPTC` brings **Code Mode / Programmatic Tool Calling (PTC)**—inspired by Cloudflare Code Mode, Anthropic Programmatic Tool Calling, and [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric)—natively to **Antigravity CLI (`agy`)**.
 
-Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read_file` -> `edit_file` -> `run_command` (and bloating the conversation window with raw intermediate outputs), the agent writes **one short TypeScript program** invoked via `mcp_agy-ptc_ptc_exec`. Intermediate files, AST symbols, loops, and conditional checks stay inside sandbox memory, returning only a compact `<= 9.6 KB` structured summary (or custom `maxOutputBytes`) to the model.
+Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read_file` -> `edit_file` -> `run_command` (and bloating the conversation window with raw intermediate outputs), the agent writes **one short TypeScript program** invoked via `mcp_agy-ptc_vm_exec`. Intermediate files, AST symbols, loops, and conditional checks stay inside sandbox memory, returning only a compact `<= 9.6 KB` structured summary (or custom `maxOutputBytes`) to the model.
 
 ---
 
 ## Why AgyPTC?
 
-| Dimension | Sequential Tool Calling | AgyPTC (`mcp_agy-ptc_ptc_exec`) |
+| Dimension | Sequential Tool Calling | AgyPTC (`mcp_agy-ptc_vm_exec`) |
 | :--- | :--- | :--- |
 | **Multi-step Search -> Read -> Edit -> Verify** | 6–15 serial LLM round-trips | **1–2 turns** (loops & branching run in `<5ms` local VM) |
 | **Intermediate Context Bloat** | Every file slice & grep dump enters LLM history | Stays in Go sandbox RAM (up to 2 MB/file, 256 KB/cmd); returns compact JSON (`<= 9.6 KB`) |
@@ -31,7 +31,7 @@ Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read
 
 ```mermaid
 flowchart LR
-    Agent["Antigravity CLI Agent"] -->|"mcp_agy-ptc_ptc_exec\n{ cwd, code, payloads?, timeoutMs? }"| Compiler["esbuild TS -> ES2020\n(<1ms + VLQ SourceMap)"]
+    Agent["Antigravity CLI Agent"] -->|"mcp_agy-ptc_vm_exec\n{ cwd, code, payloads?, timeoutMs? }"| Compiler["esbuild TS -> ES2020\n(<1ms + VLQ SourceMap)"]
     Compiler --> VM["Isolated goja JS VM\n(Promise Event Loop + Watchdog)"]
     VM --> FS["fs.* & search.*\n(rg --json + glob)"]
     VM --> AST["ast.*\n(go/parser + TS/Py/RS/Java/MD)"]
@@ -46,7 +46,7 @@ flowchart LR
 
 `AgyPTC` is designed to **complement**, not fight, Antigravity CLI's native background task manager:
 
-- **Inside `mcp_agy-ptc_ptc_exec` (`<15s` fast operations)**: Codebase search (`search.rg`/`glob`), AST outlining (`ast.outline`), multi-file reads/filtering, transactional edits (`tx.begin`), read-only git, and fast compile/lint/scoped unit checks (`go vet ./...`, `tsc --noEmit`, `go test ./pkg/...`).
+- **Inside `mcp_agy-ptc_vm_exec` (`<15s` fast operations)**: Codebase search (`search.rg`/`glob`), AST outlining (`ast.outline`), multi-file reads/filtering, transactional edits (`tx.begin`), read-only git, and fast compile/lint/scoped unit checks (`go vet ./...`, `tsc --noEmit`, `go test ./pkg/...`).
 - **Native `run_command` + `manage_task` (`>15s` long/async operations)**: Full integration/E2E suites, heavy builds (Gradle/Cargo/Docker), interactive prompts, and `IsDaemon: true` dev servers—preserving live `/tasks` log streaming and Reactive Wakeup.
 - **Compatible with [`rtk`](https://github.com/rtk-ai/rtk)**: `rtk` hooks `PreToolUse` on `run_command` only; it never mutates raw JSON stdout inside `AgyPTC`'s internal subprocesses while still compressing native `run_command` outputs.
 
@@ -82,14 +82,14 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 
 ### 2. Recommended Antigravity CLI Settings (`~/.gemini/antigravity-cli/settings.json`)
 
-Allow `mcp(agy-ptc_ptc/exec)` so PTC runs without repetitive approval prompts, and optionally enable the live TUI status bar:
+Allow `mcp(agy-ptc_vm/exec)` so PTC runs without repetitive approval prompts, and optionally enable the live TUI status bar:
 
 ```json
 {
   "allowNonWorkspaceAccess": true,
   "permissions": {
     "allow": [
-      "mcp(agy-ptc_ptc/exec)"
+      "mcp(agy-ptc_vm/exec)"
     ]
   },
   "statusLine": {
@@ -102,8 +102,8 @@ Allow `mcp(agy-ptc_ptc/exec)` so PTC runs without repetitive approval prompts, a
 
 ### 3. Two Modes of Operation
 
-1. **Hybrid Mode (Default)**: Active automatically in every `agy` session once installed. Quick 1–3 file reads use native `read_file`; multi-step exploration, AST inspection, transactional refactoring, and `<15s` checks route through `mcp_agy-ptc_ptc_exec`; `>15s` tasks use native `run_command` + `manage_task`.
-2. **Strict Code Mode (`ptc` Agent)**: Start `agy --agent ptc` (or select `ptc` via `/agents`) to run a dedicated Code Mode agent whose system prompt and tool allowlist center strictly around `mcp_agy-ptc_ptc_exec`.
+1. **Hybrid Mode (Default)**: Active automatically in every `agy` session once installed. Quick 1–3 file reads use native `read_file`; multi-step exploration, AST inspection, transactional refactoring, and `<15s` checks route through `mcp_agy-ptc_vm_exec`; `>15s` tasks use native `run_command` + `manage_task`.
+2. **Strict Code Mode (`ptc` Agent)**: Start `agy --agent ptc` (or select `ptc` via `/agents`) to run a dedicated Code Mode agent whose system prompt and tool allowlist center strictly around `mcp_agy-ptc_vm_exec`.
 
 > **Note (Antigravity Desktop Swarm)**: Fresh `swarm(action="add")` workers do not inherit configured MCP servers unless spawned with `fork` (e.g., `fork="coordinator"`); see [forum issue #201194](https://discuss.ai.google.dev/t/bug-fresh-swarm-workers-cannot-access-configured-mcp-servers-call-mcp-tool-missing-context-permission-denied/201194).
 

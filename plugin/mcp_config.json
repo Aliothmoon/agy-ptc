@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ptc": {
+    "vm": {
       "command": "node",
       "args": [
         "${PLUGIN_ROOT}/scripts/launch.mjs",

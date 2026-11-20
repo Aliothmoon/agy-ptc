@@ -1,16 +1,16 @@
 # AgyPTC — Programmatic Tool Calling (Code Mode) Rules
 
-Use **`mcp_agy-ptc_ptc_exec`** (eagerly loaded native tool) to collapse multi-step search, AST inspection, data-dependent branching/loops, atomic multi-file edits, and fast verification into **ONE TypeScript program turn**.
+Use **`mcp_agy-ptc_vm_exec`** (eagerly loaded native tool) to collapse multi-step search, AST inspection, data-dependent branching/loops, atomic multi-file edits, and fast verification into **ONE TypeScript program turn**.
 
-## When to Use `mcp_agy-ptc_ptc_exec` vs. Built-in Tools
+## When to Use `mcp_agy-ptc_vm_exec` vs. Built-in Tools
 
 | Scenario | Preferred Tool | Why |
 | :--- | :--- | :--- |
 | Read 1–3 known small files (`<300` lines) or known line slices | Built-in `read_file` (in parallel) | Locally allowlisted (~7ms, 46 KB/call inline) |
-| **Any `>=2`-step or data-dependent chain** (search -> outline -> read -> filter -> edit -> fast verify), loops over files, or **`<15s` fast checks** (`go vet`, `tsc --noEmit`, lint, scoped unit tests) | **`mcp_agy-ptc_ptc_exec`** (`{ cwd, code, payloads?, title?, timeoutMs?, maxOutputBytes? }`) | Runs locally in `<5ms` isolated TS VM (`20s` default / `120s` max timeout, process-tree kill); intermediate data stays in sandbox memory |
-| Multi-file or multi-hunk refactoring that should roll back if compile/unit checks fail | **`mcp_agy-ptc_ptc_exec` with `tx.begin()`** | Snapshots originals in memory, runs concurrent `<15s` `verify`, and auto-rolls back on failure |
+| **Any `>=2`-step or data-dependent chain** (search -> outline -> read -> filter -> edit -> fast verify), loops over files, or **`<15s` fast checks** (`go vet`, `tsc --noEmit`, lint, scoped unit tests) | **`mcp_agy-ptc_vm_exec`** (`{ cwd, code, payloads?, title?, timeoutMs?, maxOutputBytes? }`) | Runs locally in `<5ms` isolated TS VM (`20s` default / `120s` max timeout, process-tree kill); intermediate data stays in sandbox memory |
+| Multi-file or multi-hunk refactoring that should roll back if compile/unit checks fail | **`mcp_agy-ptc_vm_exec` with `tx.begin()`** | Snapshots originals in memory, runs concurrent `<15s` `verify`, and auto-rolls back on failure |
 | **Long-running tasks (`>15s`)**, full integration/E2E test suites, heavy builds (Gradle/Cargo/Docker), interactive commands, or **daemons (`IsDaemon: true`)** | Built-in **`run_command`** (`WaitMsBeforeAsync: 500..2000`) + **`manage_task`** | Detaches into `/tasks` with live streaming stdout, `send_input`/`kill` control, and automatic Reactive Wakeup without blocking the turn |
-| Macro multi-agent fan-out across independent subsystems | Built-in `run_workflow` or `swarm` (instruct workers in `brief` to use `mcp_agy-ptc_ptc_exec`) | Parallel LLM reasoning + PTC inside each worker |
+| Macro multi-agent fan-out across independent subsystems | Built-in `run_workflow` or `swarm` (instruct workers in `brief` to use `mcp_agy-ptc_vm_exec`) | Parallel LLM reasoning + PTC inside each worker |
 
 ## Sandbox API Quick Reference (`code` is an async TypeScript function body)
 
@@ -39,7 +39,7 @@ Use **`mcp_agy-ptc_ptc_exec`** (eagerly loaded native tool) to collapse multi-st
 
 ## Hygiene
 
-1. **Fast PTC + Async `/tasks` Relay**: When making code changes followed by a heavy `>15s` test/build suite, run edits + fast compile/vet inside `mcp_agy-ptc_ptc_exec` first, then launch the heavy suite via built-in `run_command(WaitMsBeforeAsync: 500..2000)` so `/tasks` streams live logs and wakes you when done. Never use `run_command` for `rg`/`grep`/`find`/`git status` or `<15s` checks.
+1. **Fast PTC + Async `/tasks` Relay**: When making code changes followed by a heavy `>15s` test/build suite, run edits + fast compile/vet inside `mcp_agy-ptc_vm_exec` first, then launch the heavy suite via built-in `run_command(WaitMsBeforeAsync: 500..2000)` so `/tasks` streams live logs and wakes you when done. Never use `run_command` for `rg`/`grep`/`find`/`git status` or `<15s` checks.
 2. **Return compact summaries (`<= 9.5 KB`)**: Filter, count, and project inside TypeScript; return concise structured objects (`{ updatedFiles, testSummary, findings }`), or pass `maxOutputBytes` only when larger raw text is explicitly needed.
 3. **Parallelize independent calls**: Use `await Promise.all([search.rg(...), git.status()])` inside `code`.
 4. **Consult `/ptc-exec` on edge cases**: Load the `ptc-exec` skill only if you hit an unfamiliar capability error or complex external MCP bridge workflow.

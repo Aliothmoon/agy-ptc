@@ -52,7 +52,7 @@ type mcpConfigFile struct {
 type MCPBridge struct {
 	Policy       *policy.Engine
 	WorkspaceDir string
-	SelfName     string // e.g. "agy-ptc" or "agy-ptc_ptc", excluded to prevent recursion
+	SelfName     string // e.g. "agy-ptc" or "agy-ptc_vm", excluded to prevent recursion
 
 	mu         sync.Mutex
 	stdioPool  map[string]*stdioClient

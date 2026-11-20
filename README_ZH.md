@@ -10,13 +10,13 @@
 
 `AgyPTC` 受 Cloudflare Code Mode、Anthropic Programmatic Tool Calling 以及 [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 启发，为 **Antigravity CLI (`agy`)** 提供原生的 **Code Mode（编程式工具调用）** 能力。
 
-传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test` -> 失败手动回滚），不仅推理延迟高，还会把大量中间文件文本塞进上下文窗口，甚至触发 Antigravity `>10 KB` 的 `output.txt` 磁盘落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_ptc_exec` 提交**一段极短的 TypeScript 脚本**，搜索、AST 符号大纲、循环过滤、跨文件原子事务修改（失败自动回滚）与外部 MCP 调用即可在 **1 个回合**内于本地 Go 沙箱内存中完成，仅将 `<= 9.6 KB` 的精简结构化摘要（亦可通过 `maxOutputBytes` 按需放开）返回给模型。
+传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test` -> 失败手动回滚），不仅推理延迟高，还会把大量中间文件文本塞进上下文窗口，甚至触发 Antigravity `>10 KB` 的 `output.txt` 磁盘落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_vm_exec` 提交**一段极短的 TypeScript 脚本**，搜索、AST 符号大纲、循环过滤、跨文件原子事务修改（失败自动回滚）与外部 MCP 调用即可在 **1 个回合**内于本地 Go 沙箱内存中完成，仅将 `<= 9.6 KB` 的精简结构化摘要（亦可通过 `maxOutputBytes` 按需放开）返回给模型。
 
 ---
 
 ## 核心特性对比
 
-| 维度 | 传统串行工具调用 | AgyPTC (`mcp_agy-ptc_ptc_exec`) |
+| 维度 | 传统串行工具调用 | AgyPTC (`mcp_agy-ptc_vm_exec`) |
 | :--- | :--- | :--- |
 | **搜索 -> 读取 -> 修改 -> 验证链路** | 6～15 次串行 LLM 回合往返 | **1～2 个回合**（分支与循环在 `<5ms` 本地沙箱内完成） |
 | **上下文窗口污染** | 每次 grep 与文件切片原样堆积进历史 | 中间数据留在沙箱内存（单文件 2 MB、单命令 256 KB），仅返回精简 JSON（`<= 9.6 KB`） |
@@ -31,7 +31,7 @@
 
 ```mermaid
 flowchart LR
-    Agent["Antigravity CLI Agent"] -->|"mcp_agy-ptc_ptc_exec\n{ cwd, code, payloads?, timeoutMs? }"| Compiler["esbuild TS -> ES2020\n(<1ms 编译 + VLQ 行号映射)"]
+    Agent["Antigravity CLI Agent"] -->|"mcp_agy-ptc_vm_exec\n{ cwd, code, payloads?, timeoutMs? }"| Compiler["esbuild TS -> ES2020\n(<1ms 编译 + VLQ 行号映射)"]
     Compiler --> VM["隔离 goja JS 沙箱\n(异步 Promise 事件循环 + 超时看门狗)"]
     VM --> FS["fs.* & search.*\n(rg --json 极速搜索 + glob)"]
     VM --> AST["ast.*\n(go/parser 精确 AST + 多语言符号大纲)"]
@@ -46,7 +46,7 @@ flowchart LR
 
 `AgyPTC` 与 Antigravity CLI 内置后台任务系统互补协作，互不抢占：
 
-- **交给 `mcp_agy-ptc_ptc_exec`（`<15s` 快速同步操作）**：代码搜索（`search.rg`/`glob`）、AST 符号定位（`ast.outline`）、批量读取与过滤、多文件事务重构（`tx.begin`）、只读 Git 查询，以及快速编译/类型检查/单包单测（`go vet ./...`、`tsc --noEmit`、`go test ./pkg/...`）。
+- **交给 `mcp_agy-ptc_vm_exec`（`<15s` 快速同步操作）**：代码搜索（`search.rg`/`glob`）、AST 符号定位（`ast.outline`）、批量读取与过滤、多文件事务重构（`tx.begin`）、只读 Git 查询，以及快速编译/类型检查/单包单测（`go vet ./...`、`tsc --noEmit`、`go test ./pkg/...`）。
 - **交给原生 `run_command` + `manage_task`（`>15s` 长耗时/后台任务）**：全量集成测试/E2E、重型构建（Gradle/Cargo/Docker）、交互式命令，以及 `IsDaemon: true` 常驻开发服务器——完整保留 `/tasks` 实时日志流与后台完成自动唤醒（Reactive Wakeup）。
 - **与 [`rtk`](https://github.com/rtk-ai/rtk) 插件零冲突共存**：`rtk` 仅通过 `PreToolUse` 拦截顶层 `run_command`，不会篡改 `AgyPTC` 内部子进程的结构化 JSON 输出；同时原生后台长任务依然享受 `rtk` 的输出压缩。
 
@@ -82,14 +82,14 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 
 ### 2. 推荐配置（`~/.gemini/antigravity-cli/settings.json`）
 
-将 `mcp(agy-ptc_ptc/exec)` 加入免确认白名单，并可选开启底部实时 TUI 状态栏：
+将 `mcp(agy-ptc_vm/exec)` 加入免确认白名单，并可选开启底部实时 TUI 状态栏：
 
 ```json
 {
   "allowNonWorkspaceAccess": true,
   "permissions": {
     "allow": [
-      "mcp(agy-ptc_ptc/exec)"
+      "mcp(agy-ptc_vm/exec)"
     ]
   },
   "statusLine": {
@@ -102,8 +102,8 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 
 ### 3. 两种工作模式
 
-1. **混合模式（Hybrid Mode，默认推荐）**：安装后自动在所有 `agy` 会话中生效。少量已知小文件继续走零开销原生 `read_file`；多步搜索、AST 分析、跨文件事务修改与 `<15s` 快速校验优先走 `mcp_agy-ptc_ptc_exec`；`>15s` 长任务走原生 `run_command` + `manage_task`。
-2. **纯粹 Code Mode（`ptc` 专属 Agent）**：通过 `agy --agent ptc` 启动（或在对话中输入 `/agents` 切换至 `ptc`），使用聚焦于 `mcp_agy-ptc_ptc_exec` 的精简工具集运行。
+1. **混合模式（Hybrid Mode，默认推荐）**：安装后自动在所有 `agy` 会话中生效。少量已知小文件继续走零开销原生 `read_file`；多步搜索、AST 分析、跨文件事务修改与 `<15s` 快速校验优先走 `mcp_agy-ptc_vm_exec`；`>15s` 长任务走原生 `run_command` + `manage_task`。
+2. **纯粹 Code Mode（`ptc` 专属 Agent）**：通过 `agy --agent ptc` 启动（或在对话中输入 `/agents` 切换至 `ptc`），使用聚焦于 `mcp_agy-ptc_vm_exec` 的精简工具集运行。
 
 > **注（Antigravity 桌面端 Swarm 限制）**：桌面版中无 `fork` 的新 `swarm(action="add")` worker 不会继承已配置的 MCP 服务，需通过 `fork`（如 `fork="coordinator"`）拉起；详见[官方论坛 #201194](https://discuss.ai.google.dev/t/bug-fresh-swarm-workers-cannot-access-configured-mcp-servers-call-mcp-tool-missing-context-permission-denied/201194)。
 

@@ -1,18 +1,18 @@
 ---
 name: ptc-exec
 description: >-
-  [DEFAULT RECOMMENDED: Prefer PTC Code Mode via mcp_agy-ptc_ptc_exec] Default to
-  using PTC Mode (`mcp_agy-ptc_ptc_exec`) instead of sequential `run_command` or
+  [DEFAULT RECOMMENDED: Prefer PTC Code Mode via mcp_agy-ptc_vm_exec] Default to
+  using PTC Mode (`mcp_agy-ptc_vm_exec`) instead of sequential `run_command` or
   split `edit_file` calls whenever performing codebase search, AST symbol analysis,
   multi-step file reads/edits, build/test checks, or external MCP orchestration.
   Provides the TypeScript sandbox API reference, transactional patterns, and error recovery guide.
 ---
 
-# `mcp_agy-ptc_ptc_exec` — Default PTC Code Mode Guide & API Reference
+# `mcp_agy-ptc_vm_exec` — Default PTC Code Mode Guide & API Reference
 
 > [!IMPORTANT]
-> **Default Recommendation — Always Prefer PTC Mode (`mcp_agy-ptc_ptc_exec`)**:
-> By default, collapse multi-step exploration (`search.rg` / `search.glob` / `ast.outlines` / `fs.read`), data-dependent filtering, multi-hunk/multi-file edits (`edit.apply` / `tx.begin`), and concurrent verification (`sh.checks` / `tx.verify`) into **one `mcp_agy-ptc_ptc_exec` TypeScript program** rather than issuing serial shell or single-hunk edit turns. For pure single-tool Code Mode sessions, recommend `agy --agent ptc` (or `/agents` -> `ptc`).
+> **Default Recommendation — Always Prefer PTC Mode (`mcp_agy-ptc_vm_exec`)**:
+> By default, collapse multi-step exploration (`search.rg` / `search.glob` / `ast.outlines` / `fs.read`), data-dependent filtering, multi-hunk/multi-file edits (`edit.apply` / `tx.begin`), and concurrent verification (`sh.checks` / `tx.verify`) into **one `mcp_agy-ptc_vm_exec` TypeScript program** rather than issuing serial shell or single-hunk edit turns. For pure single-tool Code Mode sessions, recommend `agy --agent ptc` (or `/agents` -> `ptc`).
 
 ## 1. Execution Model
 
@@ -20,7 +20,7 @@ description: >-
 - Top-level `await` and `return` work directly. Do **not** wrap `code` in `async function main() {}`.
 - `import type { ... } from "..."` (and single-line `node:buffer`/`node:path`/`node:crypto`/`node:url` imports) are handled automatically; built-in globals `Buffer`, `TextEncoder`/`TextDecoder`, `btoa`/`atob`, `path`, `crypto`, and `URL`/`URLSearchParams` are available out-of-the-box alongside host capabilities (`fs`, `search`, `ast`, `edit`, `tx`, `git`, `sh`, `state`, `tools`, `mcp`).
 - Read-only `git.*` probes and `sh.exec` (`settle: true`, `15s` default timeout) return structured `{ ok: false, timedOut, ... }` / diagnostic strings instead of crashing `Promise.all`.
-- **Timeouts & Process-Tree Protection**: `mcp_agy-ptc_ptc_exec` enforces a **`20s` default deadline** (`timeoutMs: 20000`, configurable `500..120000`) and automatically terminates entire child process trees + closes inherited pipes on timeout so runaway commands never hang.
+- **Timeouts & Process-Tree Protection**: `mcp_agy-ptc_vm_exec` enforces a **`20s` default deadline** (`timeoutMs: 20000`, configurable `500..120000`) and automatically terminates entire child process trees + closes inherited pipes on timeout so runaway commands never hang.
 - **Fast Checks vs. Long Background Tasks**: Run `<15s` checks (`go vet`, `tsc --noEmit`, lint, package-scoped unit tests) inside `sh.checks` / `tx.verify`. For `>15s` full test suites, heavy builds, or `IsDaemon: true` servers, hand off to native `run_command(WaitMsBeforeAsync: 500..2000)` + `manage_task` so `/tasks` streams live logs and wakes the session automatically.
 
 ## 2. Transactional Refactoring (`tx`)

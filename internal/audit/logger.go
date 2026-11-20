@@ -20,7 +20,7 @@ import (
 
 const maxLogFileBytes = 10 * 1024 * 1024 // 10 MB per JSONL file before rotation
 
-// Entry represents a single recorded `mcp_agy-ptc_ptc_exec` run in `executions.jsonl` / `errors.jsonl`.
+// Entry represents a single recorded `mcp_agy-ptc_vm_exec` run in `executions.jsonl` / `errors.jsonl`.
 type Entry struct {
 	ID            string            `json:"id"`
 	Timestamp     string            `json:"timestamp"`
@@ -247,7 +247,7 @@ func readJSONLFile(path string) ([]Entry, error) {
 // FormatLogs renders recent entries or a full single-run diagnostic view (`runID != ""`).
 func FormatLogs(entries []Entry, usedFiles []string, tail int, runID string) string {
 	if len(entries) == 0 {
-		return "No PTC execution logs recorded yet.\n(Logs are written automatically to ~/.gemini/antigravity-cli/plugin_data/agy-ptc/logs/ on every mcp_agy-ptc_ptc_exec call.)\n"
+		return "No PTC execution logs recorded yet.\n(Logs are written automatically to ~/.gemini/antigravity-cli/plugin_data/agy-ptc/logs/ on every mcp_agy-ptc_vm_exec call.)\n"
 	}
 
 	if runID != "" {
