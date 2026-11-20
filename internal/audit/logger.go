@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aliothmoon/agy-ptc/internal/output"
 	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
@@ -73,13 +74,13 @@ func (l *Logger) Record(e Entry) {
 
 	isProblem := e.Status != "ok" || e.FailedOps > 0
 	execCopy := e
-	if !isProblem && len(execCopy.Code) > 4000 {
-		execCopy.Code = execCopy.Code[:4000] + "\n// ... [truncated in clean log]"
-	} else if len(execCopy.Code) > 32768 {
-		execCopy.Code = execCopy.Code[:32768] + "\n// ... [truncated at 32KB]"
+	if !isProblem && len(execCopy.Code) > 16384 {
+		execCopy.Code = output.SliceUTF8Bytes(execCopy.Code, 16384) + "\n// ... [truncated at 16KB in clean log]"
+	} else if len(execCopy.Code) > 65536 {
+		execCopy.Code = output.SliceUTF8Bytes(execCopy.Code, 65536) + "\n// ... [truncated at 64KB]"
 	}
-	if len(execCopy.ResultPreview) > 4000 {
-		execCopy.ResultPreview = execCopy.ResultPreview[:4000] + "\n... [truncated in log]"
+	if len(execCopy.ResultPreview) > 16384 {
+		execCopy.ResultPreview = output.SliceUTF8Bytes(execCopy.ResultPreview, 16384) + "\n... [truncated at 16KB in log]"
 	}
 
 	l.mu.Lock()
@@ -88,8 +89,11 @@ func (l *Logger) Record(e Entry) {
 	l.appendJSONL(filepath.Join(l.logsDir, "executions.jsonl"), execCopy)
 	if isProblem {
 		errCopy := e
-		if len(errCopy.Code) > 32768 {
-			errCopy.Code = errCopy.Code[:32768] + "\n// ... [truncated at 32KB]"
+		if len(errCopy.Code) > 65536 {
+			errCopy.Code = output.SliceUTF8Bytes(errCopy.Code, 65536) + "\n// ... [truncated at 64KB]"
+		}
+		if len(errCopy.ResultPreview) > 65536 {
+			errCopy.ResultPreview = output.SliceUTF8Bytes(errCopy.ResultPreview, 65536) + "\n... [truncated at 64KB]"
 		}
 		l.appendJSONL(filepath.Join(l.logsDir, "errors.jsonl"), errCopy)
 	}
@@ -351,8 +355,8 @@ func FormatFullStreamCard(e Entry) string {
 	if e.Code != "" {
 		fmt.Fprintln(&b, "\x1b[90m▸ Input (code):\x1b[0m")
 		for i, line := range strings.Split(strings.TrimRight(e.Code, "\n"), "\n") {
-			if i >= 25 {
-				fmt.Fprintf(&b, "  \x1b[90m... (+%d more lines; run `agy-ptc logs --id %s`)\x1b[0m\n", len(strings.Split(e.Code, "\n"))-25, e.ID)
+			if i >= 60 {
+				fmt.Fprintf(&b, "  \x1b[90m... (+%d more lines; run `agy-ptc logs --id %s`)\x1b[0m\n", len(strings.Split(e.Code, "\n"))-60, e.ID)
 				break
 			}
 			fmt.Fprintf(&b, "  \x1b[90m%2d │\x1b[0m %s\n", i+1, line)
@@ -373,8 +377,8 @@ func FormatFullStreamCard(e Entry) string {
 		fmt.Fprintf(&b, "\x1b[31m▸ Error:\x1b[0m\n%s\n", e.ErrorMessage)
 	} else if e.ResultPreview != "" {
 		preview := e.ResultPreview
-		if len(preview) > 1200 {
-			preview = preview[:1200] + "\n... [truncated in live view]"
+		if len(preview) > 4000 {
+			preview = output.SliceUTF8Bytes(preview, 4000) + fmt.Sprintf("\n... [truncated in card view; run `agy-ptc logs --id %s` for full output]", e.ID)
 		}
 		fmt.Fprintf(&b, "\x1b[90m▸ Return:\x1b[0m\n%s\n", preview)
 	}
@@ -438,7 +442,7 @@ func FormatStats(entries []Entry) string {
 	fmt.Fprintf(&b, "  - Uncaught failures        : %d (%.1f%%)\n", hardErrors, float64(hardErrors)*100/float64(total))
 	fmt.Fprintf(&b, "  - Host ops compressed      : %d ops across %d turns (%.1f ops/run)\n", totalOps, total, float64(totalOps)/float64(total))
 	fmt.Fprintf(&b, "  - Avg execution latency    : %dms\n", totalDur/int64(total))
-	fmt.Fprintf(&b, "  - State auto-spills (>8.8K): %d (0 disk output.txt spills)\n", spills)
+	fmt.Fprintf(&b, "  - State auto-spills (>9.6K): %d (0 disk output.txt spills)\n", spills)
 
 	if len(catCounts) > 0 {
 		fmt.Fprintln(&b, "\nError Categories (Optimization Targets):")

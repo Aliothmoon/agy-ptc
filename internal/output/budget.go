@@ -5,14 +5,35 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
-// DefaultInlineMaxBytes guarantees MCP tool responses never trigger Antigravity CLI's ~10 KB spill-to-disk turn penalty.
-const DefaultInlineMaxBytes = 8800
+// DefaultInlineMaxBytes stays just below Antigravity CLI's ~9,888-byte inline truncation cliff so MCP responses never spill to output.txt by default.
+const DefaultInlineMaxBytes = 9600
+
+// EffectiveInlineMaxBytes resolves explicit per-call maxOutputBytes, AGY_PTC_MAX_OUTPUT_BYTES env override, or DefaultInlineMaxBytes.
+func EffectiveInlineMaxBytes(explicit int) int {
+	if explicit >= 1000 {
+		if explicit > 512*1024 {
+			return 512 * 1024
+		}
+		return explicit
+	}
+	if raw := strings.TrimSpace(os.Getenv("AGY_PTC_MAX_OUTPUT_BYTES")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 1000 {
+			if n > 512*1024 {
+				return 512 * 1024
+			}
+			return n
+		}
+	}
+	return DefaultInlineMaxBytes
+}
 
 var (
 	ansiRegex = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
@@ -260,21 +281,21 @@ func FormatCommandOutput(p CommandFormatParams) string {
 		}
 		var picked []string
 		if len(summary) > 0 {
-			if len(summary) > 2 {
-				picked = summary[len(summary)-2:]
+			if len(summary) > 16 {
+				picked = summary[len(summary)-16:]
 			} else {
 				picked = summary
 			}
-		} else if len(nonEmpty) <= 2 {
+		} else if len(nonEmpty) <= 8 {
 			picked = nonEmpty
 		} else if len(nonEmpty) > 0 {
-			picked = nonEmpty[len(nonEmpty)-1:]
+			picked = nonEmpty[len(nonEmpty)-4:]
 		}
 		capBytes := maxBytes
-		if capBytes > 320 {
-			capBytes = 320
+		if capBytes > 1200 {
+			capBytes = 1200
 		}
-		return TruncateWithByteNotice(strings.Join(picked, " | "), capBytes)
+		return TruncateWithByteNotice(strings.Join(picked, "\n"), capBytes)
 	}
 
 	rawLines := strings.Split(combined, "\n")
@@ -329,24 +350,29 @@ func FormatCommandOutput(p CommandFormatParams) string {
 	return TruncateWithByteNotice(strings.Join(outLines, "\n"), maxBytes)
 }
 
-// MarshalResultCompact serializes value to compact or readable JSON, returning string + byte length.
+// MarshalResultCompact serializes value for budget; uses indented JSON when it fits comfortably and switches to compact JSON before truncating.
 func MarshalResultCompact(val any) string {
+	return MarshalResultForBudget(val, DefaultInlineMaxBytes)
+}
+
+// MarshalResultForBudget serializes val as indented JSON if it fits within budgetBytes (and <= 6000 B),
+// otherwise compacts whitespace first so medium-sized payloads fit inline without truncation.
+func MarshalResultForBudget(val any, budgetBytes int) string {
 	if val == nil {
 		return "null"
 	}
 	if s, ok := val.(string); ok {
 		return s
 	}
-	pretty, err := json.MarshalIndent(val, "", "  ")
-	if err != nil {
+	compact, cErr := json.Marshal(val)
+	if cErr != nil {
 		return fmt.Sprintf("%v", val)
 	}
-	if len(pretty) <= 4200 {
-		return string(pretty)
-	}
-	compact, err := json.Marshal(val)
-	if err != nil {
-		return string(pretty)
+	// Only pretty-print if compact JSON is small enough that indentation won't push it over budgetBytes.
+	if len(compact) <= 4800 && (budgetBytes <= 0 || len(compact)*4/3 <= budgetBytes) {
+		if pretty, pErr := json.MarshalIndent(val, "", "  "); pErr == nil && (budgetBytes <= 0 || len(pretty) <= budgetBytes) {
+			return string(pretty)
+		}
 	}
 	return string(compact)
 }

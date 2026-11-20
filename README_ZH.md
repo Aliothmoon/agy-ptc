@@ -10,7 +10,7 @@
 
 `AgyPTC` 受 Cloudflare Code Mode、Anthropic Programmatic Tool Calling 以及 [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 启发，为 **Antigravity CLI (`agy`)** 提供原生的 **Code Mode（编程式工具调用）** 能力。
 
-传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test` -> 失败手动回滚），不仅推理延迟高，还会把大量中间文件文本塞进上下文窗口，甚至触发 Antigravity `>10 KB` 的 `output.txt` 磁盘落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_ptc_exec` 提交**一段极短的 TypeScript 脚本**，搜索、AST 符号大纲、循环过滤、跨文件原子事务修改（失败自动回滚）与外部 MCP 调用即可在 **1 个回合**内于本地 Go 沙箱内存中完成，仅将 `<= 8.8 KB` 的精简结构化摘要返回给模型。
+传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test` -> 失败手动回滚），不仅推理延迟高，还会把大量中间文件文本塞进上下文窗口，甚至触发 Antigravity `>10 KB` 的 `output.txt` 磁盘落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_ptc_exec` 提交**一段极短的 TypeScript 脚本**，搜索、AST 符号大纲、循环过滤、跨文件原子事务修改（失败自动回滚）与外部 MCP 调用即可在 **1 个回合**内于本地 Go 沙箱内存中完成，仅将 `<= 9.6 KB` 的精简结构化摘要（亦可通过 `maxOutputBytes` 按需放开）返回给模型。
 
 ---
 
@@ -19,7 +19,7 @@
 | 维度 | 传统串行工具调用 | AgyPTC (`mcp_agy-ptc_ptc_exec`) |
 | :--- | :--- | :--- |
 | **搜索 -> 读取 -> 修改 -> 验证链路** | 6～15 次串行 LLM 回合往返 | **1～2 个回合**（分支与循环在 `<5ms` 本地沙箱内完成） |
-| **上下文窗口污染** | 每次 grep 与文件切片原样堆积进历史 | 中间数据留在沙箱内存，仅返回精简 JSON（`<= 8.8 KB`） |
+| **上下文窗口污染** | 每次 grep 与文件切片原样堆积进历史 | 中间数据留在沙箱内存（单文件 2 MB、单命令 256 KB），仅返回精简 JSON（`<= 9.6 KB`） |
 | **MCP `>10 KB` `output.txt` 落盘惩罚** | 超长输出被迫落盘，额外浪费 1 个读取回合 | **0 落盘溢出** — 超限结果自动存入会话 `state.get("__last_result")` |
 | **多文件重构安全性** | 单测失败时半成品修改残留在磁盘 | **`tx.begin()` 内存快照事务**，单测失败 / 抛错 / 超时自动字节级回滚 |
 | **误跑长任务 / 子进程卡死防护** | 容易拖死回合或残留孤儿进程占住管道 | **默认 `20s` 超时 + 递归强杀进程树**（Windows `taskkill /T /F` / Unix `-pgid` + `WaitDelay`） |
@@ -189,7 +189,7 @@ if (found.length > 0) {
   return { ref: schema.ref, preview: res.text.slice(0, 400) };
 }
 ```
-- 当脚本返回值超过 `8,800` UTF-8 字节时，`AgyPTC` 会在内联返回首尾摘要的同时，自动将完整对象存入 `state.get("__last_result")`（及编号键 `__result_N`），下一回合可直接在内存中切片读取。
+- 当脚本返回值超过 `9,600` UTF-8 字节（支持通过 `maxOutputBytes` 按需放开）时，`AgyPTC` 会优先自动切换为紧凑无缩进 JSON；若仍超限，则内联返回首尾摘要并自动将完整对象存入 `state.get("__last_result")`（及编号键 `__result_N`），下一回合可直接在内存中切片读取。
 
 ---
 

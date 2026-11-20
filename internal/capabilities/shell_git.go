@@ -264,13 +264,18 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 		}
 	}
 
+	// Inside sandbox memory (compact=false), preserve up to 256 KB so guest TypeScript can JSON.parse(r.output) or filter full stdout without truncation!
+	maxCmdBytes := 256 * 1024
+	if compact || timedOut || parentCanceled {
+		maxCmdBytes = 8000
+	}
 	formatted := output.FormatCommandOutput(output.CommandFormatParams{
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 		ExitCode: exitCode,
 		TimedOut: timedOut,
 		SpawnErr: spawnErr,
-		MaxBytes: 6000,
+		MaxBytes: maxCmdBytes,
 		Compact:  compact,
 	})
 	if timedOut {
@@ -293,7 +298,7 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 	}
 
 	if !ok && !settle {
-		return nil, fmt.Errorf("command '%s' failed (exit %d): %s", cmdLine, exitCode, formatted)
+		return nil, fmt.Errorf("command '%s' failed (exit %d): %s", cmdLine, exitCode, output.TruncateWithByteNotice(formatted, 4000))
 	}
 	return envelope, nil
 }
@@ -503,7 +508,7 @@ func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, 
 	cmd := exec.CommandContext(cctx, "git", fullArgs...)
 	cmd.Dir = cwd
 	setSysProcAttrHide(cmd)
-	stdout := newLimitedSyncBuffer(256 * 1024)
+	stdout := newLimitedSyncBuffer(512 * 1024)
 	stderr := newLimitedSyncBuffer(64 * 1024)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -513,7 +518,7 @@ func runReadOnlyGit(ctx context.Context, cwd string, gitArgs []string) (string, 
 		}
 		return "", fmt.Errorf("git %s failed: %s", sub, strings.TrimSpace(stderr.String()))
 	}
-	return output.TruncateHeadTailBytes(strings.TrimRight(stdout.String(), "\r\n"), 64*1024, ""), nil
+	return output.TruncateHeadTailBytes(strings.TrimRight(stdout.String(), "\r\n"), 256*1024, ""), nil
 }
 
 func runGitStructuredStatus(ctx context.Context, cwd string) (map[string]any, error) {

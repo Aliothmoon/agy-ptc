@@ -19,12 +19,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/aliothmoon/agy-ptc/internal/output"
 	"github.com/aliothmoon/agy-ptc/internal/policy"
 	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
 const (
 	MaxSandboxReadBytes = 2 * 1024 * 1024 // 2 MB per file inside sandbox memory (never directly enters LLM context)
+	MaxSearchLineBytes  = 600             // UTF-8-safe per-line preview cap for search.rg
 )
 
 var skippedWalkDirs = map[string]bool{
@@ -285,7 +287,10 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if err != nil {
 				return nil, err
 			}
-			maxResults := optInt(opts, "maxResults", optInt(opts, "limit", 200))
+			maxResults := optInt(opts, "maxResults", optInt(opts, "limit", 500))
+			if maxResults > 5000 {
+				maxResults = 5000
+			}
 			files, note, err := b.runGlobSearch(ctx, env.Cwd, searchRoot, pat, maxResults)
 			if err != nil {
 				return nil, err
@@ -352,12 +357,12 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 		if q.contextLines > 5 {
 			q.contextLines = 5
 		}
-		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", 100))
+		q.maxResults = optInt(opts, "maxResults", optInt(opts, "limit", 200))
 		if q.maxResults <= 0 {
-			q.maxResults = 100
+			q.maxResults = 200
 		}
-		if q.maxResults > 500 {
-			q.maxResults = 500
+		if q.maxResults > 2000 {
+			q.maxResults = 2000
 		}
 	}
 	return q, nil
@@ -458,8 +463,8 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 			sub = ev.Data.Submatches[0].Match.Text
 		}
 		lineText := strings.TrimRight(ev.Data.Lines.Text, "\r\n")
-		if len(lineText) > 280 {
-			lineText = lineText[:280] + "..."
+		if len(lineText) > MaxSearchLineBytes {
+			lineText = output.SliceUTF8Bytes(lineText, MaxSearchLineBytes) + "..."
 		}
 		hits = append(hits, SearchHit{
 			File:    relDisplayPath(workspaceCwd, ev.Data.Path.Text),
@@ -546,8 +551,8 @@ func runGoFallbackSearch(ctx context.Context, workspaceCwd, searchRoot string, q
 				}
 			}
 			txt := line
-			if len(txt) > 280 {
-				txt = txt[:280] + "..."
+			if len(txt) > MaxSearchLineBytes {
+				txt = output.SliceUTF8Bytes(txt, MaxSearchLineBytes) + "..."
 			}
 			hits = append(hits, SearchHit{
 				File:    rel,

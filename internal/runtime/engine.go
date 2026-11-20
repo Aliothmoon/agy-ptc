@@ -79,12 +79,13 @@ func (e *Engine) Close() {
 
 // ExecInput represents the flat MCP arguments passed to `exec`.
 type ExecInput struct {
-	Code       string            `json:"code"`
-	Payloads   map[string]string `json:"payloads,omitempty"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Title      string            `json:"title,omitempty"`
-	TimeoutMs  int               `json:"timeoutMs,omitempty"`
-	TimeoutSec int               `json:"timeoutSec,omitempty"`
+	Code           string            `json:"code"`
+	Payloads       map[string]string `json:"payloads,omitempty"`
+	Cwd            string            `json:"cwd,omitempty"`
+	Title          string            `json:"title,omitempty"`
+	TimeoutMs      int               `json:"timeoutMs,omitempty"`
+	TimeoutSec     int               `json:"timeoutSec,omitempty"`
+	MaxOutputBytes int               `json:"maxOutputBytes,omitempty"`
 }
 
 // SetClientWorkspace records a workspace root reported by the MCP client during `initialize`.
@@ -165,6 +166,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 		},
 	}
 
+	maxOutBytes := output.EffectiveInlineMaxBytes(in.MaxOutputBytes)
 	res, execErr := sandbox.Execute(ctx, req, fsSearch, astBinder, shellGit, editTx, stateBinder, bridge)
 	runs := e.totalRuns.Add(1)
 
@@ -173,7 +175,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 		if errors.As(execErr, &ee) {
 			ops := e.totalHostOps.Add(int64(len(ee.Traces)))
 			failedOps := countFailedTraces(ee.Traces)
-			formatted := formatErrorEnvelope(ee)
+			formatted := formatErrorEnvelope(ee, maxOutBytes)
 			statusTag := ee.Phase + "_error"
 			if ee.Phase == "timeout" {
 				statusTag = "timeout"
@@ -203,7 +205,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 			})
 			return formatted, true
 		}
-		formatted := output.TruncateWithByteNotice("Error: "+execErr.Error(), output.DefaultInlineMaxBytes)
+		formatted := output.TruncateWithByteNotice("Error: "+execErr.Error(), maxOutBytes)
 		e.auditor.Record(audit.Entry{
 			Cwd:           cwd,
 			Title:         title,
@@ -226,7 +228,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 
 	ops := e.totalHostOps.Add(int64(len(res.Traces)))
 	failedOps := countFailedTraces(res.Traces)
-	formatted, autoSpilled := formatSuccessEnvelope(res, store)
+	formatted, autoSpilled := formatSuccessEnvelope(res, store, maxOutBytes)
 
 	statusTag := "ok"
 	errCat := ""
@@ -384,28 +386,32 @@ func (e *Engine) writeLiveStatus(st LiveStatus) {
 	}
 }
 
-func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateStore) (string, bool) {
+func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateStore, maxOutBytes int) (string, bool) {
+	if maxOutBytes <= 0 {
+		maxOutBytes = output.DefaultInlineMaxBytes
+	}
 	header := fmt.Sprintf("[ptc ok | %d host ops | %dms]", len(res.Traces), res.DurationMs)
 	var sections []string
 	sections = append(sections, header)
 
 	if len(res.Logs) > 0 {
 		logText := "Logs:\n" + strings.Join(res.Logs, "\n")
-		sections = append(sections, output.TruncateWithByteNotice(logText, 1800))
+		sections = append(sections, output.TruncateWithByteNotice(logText, max(2400, maxOutBytes/4)))
 	}
 
-	serialized := output.MarshalResultCompact(res.Value)
 	currentUsed := 0
 	for _, s := range sections {
 		currentUsed += len(s) + 2
 	}
-	availForResult := output.DefaultInlineMaxBytes - currentUsed - 40
+	availForResult := maxOutBytes - currentUsed - 24
 	if availForResult < 800 {
 		availForResult = 800
 	}
 
+	serialized := output.MarshalResultForBudget(res.Value, availForResult-8)
+
 	autoSpilled := false
-	if len(serialized) <= availForResult {
+	if len("Result:\n"+serialized) <= availForResult {
 		sections = append(sections, "Result:\n"+serialized)
 	} else {
 		autoSpilled = true
@@ -413,23 +419,26 @@ func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateSto
 		spillKey := store.SaveAutoSpill(res.Value)
 		hint := ""
 		if spillKey != "" {
-			hint = fmt.Sprintf("; full object saved in state.get('%s') and state.get('__last_result') — filter/slice in code instead of dumping raw data", spillKey)
+			hint = fmt.Sprintf("; full object saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
 		}
 		preview := output.TruncateHeadTailBytes("Result:\n"+serialized, availForResult, hint)
 		sections = append(sections, preview)
 	}
 
 	joined := strings.Join(sections, "\n\n")
-	if len(joined) <= output.DefaultInlineMaxBytes {
+	if len(joined) <= maxOutBytes {
 		return joined, autoSpilled
 	}
-	return output.TruncateWithByteNotice(joined, output.DefaultInlineMaxBytes), autoSpilled
+	return output.TruncateWithByteNotice(joined, maxOutBytes), autoSpilled
 }
 
-func formatErrorEnvelope(ee *sandbox.ExecutionError) string {
+func formatErrorEnvelope(ee *sandbox.ExecutionError, maxOutBytes int) string {
+	if maxOutBytes <= 0 {
+		maxOutBytes = output.DefaultInlineMaxBytes
+	}
 	header := fmt.Sprintf("[ptc %s error | %d ops run | %dms]\n%s", ee.Phase, len(ee.Traces), ee.DurationMs, ee.Message)
 	var sections []string
-	sections = append(sections, output.TruncateWithByteNotice(header, 4800))
+	sections = append(sections, output.TruncateWithByteNotice(header, max(5400, maxOutBytes*2/3)))
 
 	if ee.Phase == "timeout" {
 		var culprits []string
@@ -477,5 +486,5 @@ func formatErrorEnvelope(ee *sandbox.ExecutionError) string {
 		sections = append(sections, output.TruncateWithByteNotice("Logs:\n"+strings.Join(ee.Logs, "\n"), 1400))
 	}
 
-	return output.FitSectionsToByteBudget(sections, output.DefaultInlineMaxBytes, "\n\n")
+	return output.FitSectionsToByteBudget(sections, maxOutBytes, "\n\n")
 }

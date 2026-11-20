@@ -10,7 +10,7 @@
 
 `AgyPTC` brings **Code Mode / Programmatic Tool Calling (PTC)**—inspired by Cloudflare Code Mode, Anthropic Programmatic Tool Calling, and [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric)—natively to **Antigravity CLI (`agy`)**.
 
-Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read_file` -> `edit_file` -> `run_command` (and bloating the conversation window with raw intermediate outputs), the agent writes **one short TypeScript program** invoked via `mcp_agy-ptc_ptc_exec`. Intermediate files, AST symbols, loops, and conditional checks stay inside sandbox memory, returning only a compact `<= 8.8 KB` structured summary to the model.
+Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read_file` -> `edit_file` -> `run_command` (and bloating the conversation window with raw intermediate outputs), the agent writes **one short TypeScript program** invoked via `mcp_agy-ptc_ptc_exec`. Intermediate files, AST symbols, loops, and conditional checks stay inside sandbox memory, returning only a compact `<= 9.6 KB` structured summary (or custom `maxOutputBytes`) to the model.
 
 ---
 
@@ -19,7 +19,7 @@ Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read
 | Dimension | Sequential Tool Calling | AgyPTC (`mcp_agy-ptc_ptc_exec`) |
 | :--- | :--- | :--- |
 | **Multi-step Search -> Read -> Edit -> Verify** | 6–15 serial LLM round-trips | **1–2 turns** (loops & branching run in `<5ms` local VM) |
-| **Intermediate Context Bloat** | Every file slice & grep dump enters LLM history | Stays in Go sandbox RAM; returns compact JSON (`<= 8.8 KB`) |
+| **Intermediate Context Bloat** | Every file slice & grep dump enters LLM history | Stays in Go sandbox RAM (up to 2 MB/file, 256 KB/cmd); returns compact JSON (`<= 9.6 KB`) |
 | **Antigravity `>10 KB` MCP Disk Spills** | Spills to `.system_generated/steps/<N>/output.txt` (+1 read turn) | **0 disk spills** — oversized results auto-save to `state.get("__last_result")` |
 | **Multi-File Refactoring Safety** | Partial broken edits left on disk when tests fail | **Atomic `tx.begin()`** snapshots files in RAM & auto-rolls back on failure/timeout |
 | **Accidental Long/Hung Commands** | Can stall turns or leak orphan child processes | **`20s` default deadline + recursive process-tree kill** (`taskkill /T /F` / `-pgid` + `WaitDelay`) |
@@ -189,7 +189,7 @@ if (found.length > 0) {
   return { ref: schema.ref, preview: res.text.slice(0, 400) };
 }
 ```
-- If a return value exceeds `8,800` UTF-8 bytes, `AgyPTC` returns a head+tail preview inline and automatically stores the full object in `state.get("__last_result")` (and `state.get("__result_N")`) for zero-cost slicing in the next turn.
+- If a return value exceeds `9,600` UTF-8 bytes (or custom `maxOutputBytes`), `AgyPTC` automatically compacts JSON whitespace first, and if still larger, returns a head+tail preview inline while storing the full object in `state.get("__last_result")` (and `state.get("__result_N")`) for zero-cost slicing in the next turn.
 
 ---
 

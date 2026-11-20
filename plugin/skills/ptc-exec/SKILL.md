@@ -68,7 +68,7 @@ if (hits.length > 0) {
 
 ## 4. Handling Large Datasets Across Turns (`state.*`)
 
-If a result exceeds `8,800` UTF-8 bytes, `AgyPTC` automatically saves the full object in `state.get("__last_result")` (and a numbered `state.get("__result_N")` key) instead of spilling to `output.txt`. Filter or page it in the next turn:
+If a result exceeds `9,600` UTF-8 bytes (configurable via `maxOutputBytes`), `AgyPTC` automatically switches to compact JSON first and saves oversized objects in `state.get("__last_result")` (and a numbered `state.get("__result_N")` key) instead of spilling to `output.txt`. Filter or page it in the next turn:
 
 ```ts
 const prev = state.get("__last_result") as Array<{ file: string; line: number }>;

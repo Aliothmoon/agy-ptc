@@ -352,6 +352,12 @@ func execToolDefinition() map[string]any {
 					"maximum":     120000,
 					"description": "Optional execution deadline in milliseconds (default 20000, max 120000). Subprocess trees are automatically killed on timeout. For >15s builds/tests or daemons, use built-in run_command + manage_task.",
 				},
+				"maxOutputBytes": map[string]any{
+					"type":        "integer",
+					"minimum":     1000,
+					"maximum":     524288,
+					"description": "Optional max UTF-8 bytes returned inline (default 9600 to stay below Antigravity CLI's ~10KB output.txt spill cliff; increase up to 524288 when larger raw output is explicitly desired).",
+				},
 			},
 			"required": []string{"code", "cwd"},
 		},

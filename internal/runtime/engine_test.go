@@ -434,3 +434,43 @@ func mustJSONString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestSandboxShellLargeJSONOutputMaxOutputOverrideAndUTF8Search(t *testing.T) {
+	ws := t.TempDir()
+	// Create a file with a >350-byte Chinese UTF-8 line to verify search.rg never splits a 3-byte rune!
+	longCJK := "// " + strings.Repeat("中文搜索行不乱码测试", 22) // 22 * 30 = 660 UTF-8 bytes
+	_ = os.WriteFile(filepath.Join(ws, "cjk.go"), []byte("package demo\n"+longCJK+"\n"), 0o644)
+
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	// 1. sh.exec inside sandbox must preserve >30 KB stdout intact so JSON.parse(r.output) succeeds!
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const r = await sh.exec("node -e \"const a=[]; for(let i=0;i<600;i++) a.push({id:i,pad:'x'.repeat(40)}); console.log(JSON.stringify(a))\"");
+			const parsed = JSON.parse(r.output);
+			const hits = await search.rg("中文搜索行", { path: "cjk.go", literal: true });
+			return { rawLen: r.output.length, count: parsed.length, lastId: parsed[599].id, hitLen: hits[0].text.length };
+		`,
+	})
+	if isErr {
+		t.Fatalf("expected >30KB JSON.parse inside sh.exec and CJK search to succeed, got: %s", out)
+	}
+	if !strings.Contains(out, `"count": 600`) || !strings.Contains(out, `"lastId": 599`) {
+		t.Fatalf("unexpected sh.exec JSON parse result: %s", out)
+	}
+	if strings.ContainsRune(out, '\ufffd') {
+		t.Fatalf("detected invalid UTF-8 replacement character in output: %s", out)
+	}
+
+	// 2. Explicit MaxOutputBytes override allows returning >9.6 KB inline without auto-spill truncation!
+	outLarge, isErrLarge := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:            ws,
+		MaxOutputBytes: 24000,
+		Code:           `return "A".repeat(15000);`,
+	})
+	if isErrLarge || strings.Contains(outLarge, "__last_result") || len(outLarge) < 15000 {
+		t.Fatalf("expected MaxOutputBytes=24000 to return full 15KB string inline, got len=%d: %s", len(outLarge), outLarge[:min(200, len(outLarge))])
+	}
+}

@@ -144,6 +144,7 @@ func runStandalone(args []string) {
 	cwd := fs.String("cwd", "", "Workspace directory")
 	codeFlag := fs.String("code", "", "Inline TypeScript code to execute")
 	timeoutMs := fs.Int("timeout", 20000, "Timeout in milliseconds (default 20000, max 120000)")
+	maxOut := fs.Int("max-output", 65536, "Max output UTF-8 bytes in standalone CLI mode (default 65536)")
 	_ = fs.Parse(args)
 
 	code := *codeFlag
@@ -168,10 +169,11 @@ func runStandalone(args []string) {
 	defer eng.Close()
 
 	out, isErr := eng.RunMCPExec(context.Background(), ptcruntime.ExecInput{
-		Code:      code,
-		Cwd:       *cwd,
-		Title:     "cli-run",
-		TimeoutMs: *timeoutMs,
+		Code:           code,
+		Cwd:            *cwd,
+		Title:          "cli-run",
+		TimeoutMs:      *timeoutMs,
+		MaxOutputBytes: *maxOut,
 	})
 	fmt.Println(out)
 	if isErr {
