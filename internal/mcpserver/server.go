@@ -15,11 +15,12 @@ import (
 	"sync"
 
 	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
+	"github.com/aliothmoon/agy-ptc/internal/version"
 )
 
 const (
 	ServerName             = "agy-ptc"
-	ServerVersion          = "0.1.0"
+	ServerVersion          = version.Version
 	DefaultProtocolVersion = "2025-03-26"
 )
 

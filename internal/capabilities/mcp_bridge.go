@@ -21,6 +21,7 @@ import (
 
 	"github.com/aliothmoon/agy-ptc/internal/policy"
 	"github.com/aliothmoon/agy-ptc/internal/sandbox"
+	"github.com/aliothmoon/agy-ptc/internal/version"
 )
 
 // ToolDescriptor represents a discoverable builtin or MCP action inside `tools.*`.
@@ -543,7 +544,7 @@ func startStdioClient(cfg externalServerCfg) (*stdioClient, error) {
 	_, err = c.sendRPC(initCtx, "initialize", map[string]any{
 		"protocolVersion": "2025-03-26",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "agy-ptc-bridge", "version": "0.1.0"},
+		"clientInfo":      map[string]any{"name": "agy-ptc-bridge", "version": version.Version},
 	})
 	if err != nil {
 		c.close()
