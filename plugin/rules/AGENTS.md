@@ -40,6 +40,6 @@ Use **`mcp_agy-ptc_vm_exec`** (eagerly loaded native tool) to collapse multi-ste
 ## Hygiene
 
 1. **Fast PTC + Async `/tasks` Relay**: When making code changes followed by a heavy `>15s` test/build suite, run edits + fast compile/vet inside `mcp_agy-ptc_vm_exec` first, then launch the heavy suite via built-in `run_command(WaitMsBeforeAsync: 500..2000)` so `/tasks` streams live logs and wakes you when done. Never use `run_command` for `rg`/`grep`/`find`/`git status` or `<15s` checks.
-2. **Return compact summaries (`<= 9.5 KB`)**: Filter, count, and project inside TypeScript; return concise structured objects (`{ updatedFiles, testSummary, findings }`), or pass `maxOutputBytes` only when larger raw text is explicitly needed.
+2. **Return compact, unescaped output (`<= 9.5 KB`)**: Filter, count, and project inside TypeScript. For multiline code snippets, diffs, logs, or reports, prefer `print(...)` / `console.log(...)` (without `return`) or returning a plain formatted `string` to avoid JSON escaping overhead (`\n`, `\"`, `\\`). Use `return { ... }` for compact structured metadata or objects you want saved in `state.get("__last_result")`; pass `maxOutputBytes` only when larger raw text is explicitly needed.
 3. **Parallelize independent calls**: Use `await Promise.all([search.rg(...), git.status()])` inside `code`.
 4. **Consult `/ptc-exec` on edge cases**: Load the `ptc-exec` skill only if you hit an unfamiliar capability error or complex external MCP bridge workflow.

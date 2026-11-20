@@ -704,3 +704,104 @@ func TestShellExecEmptyOutputReturnsEmptyStringNotSyntheticOK(t *testing.T) {
 		}
 	}
 }
+
+func TestPrintStdoutFirstModeFullBudgetNoJSONEscapingAndAutoSpill(t *testing.T) {
+	ws := t.TempDir()
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	// 1. print() without return streams raw unescaped multiline stdout under full budget (no 600B/2400B cap, no Result:\nnull)
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const block = "line with \"quotes\" & C:\\Users\\demo\\file.go\n" + "中文测试内容不截断_".repeat(120);
+			print("=== REPORT ===");
+			console.log(block);
+			print("=== END ===");
+		`,
+	})
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	if strings.Contains(out, "Result:\nnull") || strings.Contains(out, "\nLogs:\n") {
+		t.Fatalf("stdout-only mode should omit Logs:/Result:null wrapper, got: %s", out)
+	}
+	if !strings.Contains(out, `line with "quotes" & C:\Users\demo\file.go`) || !strings.Contains(out, "=== END ===") {
+		t.Fatalf("expected unescaped full stdout, got: %s", out)
+	}
+	if strings.Contains(out, "...(truncated)") || strings.ContainsRune(out, '\ufffd') {
+		t.Fatalf("stdout should not suffer 600B truncation or UTF-8 corruption, got: %s", out)
+	}
+
+	// 2. Oversized print() stdout auto-spills to state.get('__last_result') and puts notice in line 1
+	outBig, isErrBig := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:            ws,
+		MaxOutputBytes: 2500,
+		Code:           `print("HEAD_MARK\n" + "a".repeat(6000) + "\nTAIL_MARK");`,
+	})
+	if isErrBig {
+		t.Fatalf("unexpected error on big stdout: %s", outBig)
+	}
+	firstLine := strings.SplitN(outBig, "\n", 2)[0]
+	if !strings.Contains(firstLine, "full stdout saved in state.get('__result_") {
+		t.Fatalf("expected stdout spill notice on line 1, got: %s", firstLine)
+	}
+	// Verify next turn can read the full intact stdout string from state.get('__last_result')
+	outRead, isErrRead := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:  ws,
+		Code: `const s = state.get("__last_result"); return { len: s.length, hasTail: s.endsWith("TAIL_MARK") };`,
+	})
+	if isErrRead || !strings.Contains(outRead, `"hasTail": true`) {
+		t.Fatalf("expected full stdout retrievable from state, got: %s", outRead)
+	}
+
+	// 3. Explicit `return null` still renders Result:\nnull alongside Logs:
+	outNull, isErrNull := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:  ws,
+		Code: `print("side log"); return null;`,
+	})
+	if isErrNull || !strings.Contains(outNull, "Logs:\nside log") || !strings.Contains(outNull, "Result:\nnull") {
+		t.Fatalf("expected explicit return null to preserve Logs + Result:null, got: %s", outNull)
+	}
+}
+
+func TestPrintAndReturnShareBudgetDynamically(t *testing.T) {
+	ws := t.TempDir()
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	// 1. 4KB print() + tiny return { ok: true } should both fit completely without 2400B log truncation
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			print("START_4K\n" + "x".repeat(4200) + "\nEND_4K");
+			return { ok: true, count: 1 };
+		`,
+	})
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	if !strings.Contains(out, "END_4K") || !strings.Contains(out, `"ok": true`) {
+		t.Fatalf("expected full 4KB print + tiny return without truncation, got len=%d: %s", len(out), out[:min(len(out), 400)])
+	}
+	if strings.Contains(out, "[truncated") {
+		t.Fatalf("did not expect truncation when logs+result fit within 9.6KB budget: %s", out)
+	}
+
+	// 2. Oversized print() + tiny return should auto-spill full stdout to state and advertise in header
+	outSpill, isErrSpill := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd:            ws,
+		MaxOutputBytes: 2600,
+		Code: `
+			print("BIG_HEAD\n" + "y".repeat(6000) + "\nBIG_TAIL");
+			return { ok: true };
+		`,
+	})
+	if isErrSpill {
+		t.Fatalf("unexpected error: %s", outSpill)
+	}
+	firstLine := strings.SplitN(outSpill, "\n", 2)[0]
+	if !strings.Contains(firstLine, "state.get('__result_") || !strings.Contains(outSpill, `"ok": true`) {
+		t.Fatalf("expected auto-spill notice on line 1 plus intact tiny return, got: %s", outSpill)
+	}
+}

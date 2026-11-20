@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/aliothmoon/agy-ptc/internal/compiler"
+	"github.com/aliothmoon/agy-ptc/internal/output"
 	"github.com/dop251/goja"
 )
 
@@ -24,8 +26,8 @@ const (
 	DefaultTimeout = 20 * time.Second
 	MaxTimeout     = 120 * time.Second
 	DefaultMaxOps  = 400
-	MaxLogEntries  = 120
-	MaxLogBytes    = 8192
+	MaxLogEntries  = 2000
+	MaxLogBytes    = 256 * 1024
 )
 
 // EffectiveDefaultTimeout returns DefaultTimeout (20s) unless overridden via AGY_PTC_DEFAULT_TIMEOUT_MS.
@@ -88,6 +90,7 @@ type ExecRequest struct {
 // ExecResult contains the outcome, logs, and operation trace of a PTC execution.
 type ExecResult struct {
 	Value      any       `json:"value"`
+	HasValue   bool      `json:"hasValue,omitempty"`
 	Logs       []string  `json:"logs,omitempty"`
 	Traces     []OpTrace `json:"traces,omitempty"`
 	DurationMs int64     `json:"durationMs"`
@@ -341,13 +344,24 @@ func (env *ExecutionEnv) appendLog(level string, args []goja.Value) {
 	}
 	parts := make([]string, len(args))
 	for i, a := range args {
+		if a == nil || goja.IsUndefined(a) {
+			parts[i] = "undefined"
+			continue
+		}
+		if goja.IsNull(a) {
+			parts[i] = "null"
+			continue
+		}
 		exp := a.Export()
 		switch val := exp.(type) {
 		case string:
 			parts[i] = val
 		default:
-			if b, err := json.Marshal(val); err == nil {
-				parts[i] = string(b)
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(val); err == nil {
+				parts[i] = strings.TrimRight(buf.String(), "\n")
 			} else {
 				parts[i] = fmt.Sprintf("%v", val)
 			}
@@ -357,11 +371,12 @@ func (env *ExecutionEnv) appendLog(level string, args []goja.Value) {
 	if level != "" && level != "log" {
 		line = "[" + level + "] " + line
 	}
-	if len(line) > 600 {
-		line = line[:600] + "...(truncated)"
+	remaining := MaxLogBytes - env.logBytes
+	if len(line) > remaining {
+		line = output.SliceUTF8Bytes(line, remaining) + "...(truncated)"
 	}
 	env.logs = append(env.logs, line)
-	env.logBytes += len(line)
+	env.logBytes += len(line) + 1
 }
 
 func (env *ExecutionEnv) getLogs() []string {
@@ -516,8 +531,14 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 
 	promise, ok := retVal.Export().(*goja.Promise)
 	if !ok {
+		hasVal := retVal != nil && !goja.IsUndefined(retVal)
+		var exported any
+		if hasVal {
+			exported = retVal.Export()
+		}
 		return &ExecResult{
-			Value:      retVal.Export(),
+			Value:      exported,
+			HasValue:   hasVal,
 			Logs:       env.getLogs(),
 			Traces:     env.getTraces(),
 			DurationMs: time.Since(start).Milliseconds(),
@@ -594,11 +615,14 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (*Ex
 	}
 
 	var exported any
+	hasVal := false
 	if res := promise.Result(); res != nil && !goja.IsUndefined(res) {
+		hasVal = true
 		exported = res.Export()
 	}
 	return &ExecResult{
 		Value:      exported,
+		HasValue:   hasVal,
 		Logs:       env.getLogs(),
 		Traces:     env.getTraces(),
 		DurationMs: time.Since(start).Milliseconds(),

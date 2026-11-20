@@ -394,44 +394,125 @@ func formatSuccessEnvelope(res *sandbox.ExecResult, store *capabilities.StateSto
 	var sections []string
 	sections = append(sections, header)
 
+	// Stdout-first mode: when the script prints via `print()` / `console.log()` without returning a value,
+	// stream raw unescaped stdout directly under the full inline budget (no `Logs:` shell, no `Result:\nnull`, no JSON escaping).
+	if !res.HasValue && len(res.Logs) > 0 {
+		stdout := strings.Join(res.Logs, "\n")
+		avail := maxOutBytes - len(header) - 24
+		if avail < 800 {
+			avail = 800
+		}
+		autoSpilled := false
+		if len(stdout) <= avail {
+			sections = append(sections, stdout)
+		} else {
+			autoSpilled = true
+			spillKey := store.SaveAutoSpill(stdout)
+			hint := ""
+			if spillKey != "" {
+				sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full stdout saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillKey)
+				hint = fmt.Sprintf("; full stdout saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
+				avail = maxOutBytes - len(sections[0]) - 24
+				if avail < 800 {
+					avail = 800
+				}
+			}
+			sections = append(sections, output.TruncateHeadTailBytes(stdout, avail, hint))
+		}
+		joined := strings.Join(sections, "\n\n")
+		if len(joined) <= maxOutBytes {
+			return joined, autoSpilled
+		}
+		return output.TruncateWithByteNotice(joined, maxOutBytes), autoSpilled
+	}
+
+	totalAvail := maxOutBytes - len(header) - 24
+	if totalAvail < 800 {
+		totalAvail = 800
+	}
+
+	rawLogs := ""
+	logSection := ""
 	if len(res.Logs) > 0 {
-		logText := "Logs:\n" + strings.Join(res.Logs, "\n")
-		sections = append(sections, output.TruncateWithByteNotice(logText, max(2400, maxOutBytes/4)))
+		rawLogs = strings.Join(res.Logs, "\n")
+		logSection = "Logs:\n" + rawLogs
 	}
-
-	currentUsed := 0
-	for _, s := range sections {
-		currentUsed += len(s) + 2
-	}
-	availForResult := maxOutBytes - currentUsed - 24
-	if availForResult < 800 {
-		availForResult = 800
-	}
-
-	serialized := output.MarshalResultForBudget(res.Value, availForResult-8)
+	serialized := output.MarshalResultForBudget(res.Value, totalAvail-8)
+	resSection := "Result:\n" + serialized
 
 	autoSpilled := false
-	if len("Result:\n"+serialized) <= availForResult {
-		sections = append(sections, "Result:\n"+serialized)
-	} else {
-		autoSpilled = true
-		// Auto-save full value in session state so model can slice/filter in next turn with 0 output.txt disk spills!
-		spillKey := store.SaveAutoSpill(res.Value)
-		hint := ""
-		if spillKey != "" {
-			sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full intact object saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillKey)
-			hint = fmt.Sprintf("; full object saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
-			currentUsed = 0
-			for _, s := range sections {
-				currentUsed += len(s) + 2
+	if logSection == "" {
+		if len(resSection) <= totalAvail {
+			sections = append(sections, resSection)
+		} else {
+			autoSpilled = true
+			spillKey := store.SaveAutoSpill(res.Value)
+			hint := ""
+			avail := totalAvail
+			if spillKey != "" {
+				sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full intact object saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillKey)
+				hint = fmt.Sprintf("; full object saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillKey)
+				avail = maxOutBytes - len(sections[0]) - 24
+				if avail < 800 {
+					avail = 800
+				}
 			}
-			availForResult = maxOutBytes - currentUsed - 24
-			if availForResult < 800 {
-				availForResult = 800
+			sections = append(sections, output.TruncateHeadTailBytes(resSection, avail, hint))
+		}
+	} else if len(logSection)+2+len(resSection) <= totalAvail {
+		// Both stdout logs and return value fit completely inline — never artificially clip logs at 2400B!
+		sections = append(sections, logSection, resSection)
+	} else {
+		// Dynamically split the inline budget between Logs and Result so a tiny Result lets Logs use the rest (and vice versa).
+		autoSpilled = true
+		var spillPayload any
+		spillLabel := "output"
+		if len(resSection) > totalAvail/2 && len(logSection) > totalAvail/2 {
+			spillPayload = map[string]any{"logs": rawLogs, "result": res.Value}
+			spillLabel = "logs + result"
+		} else if len(resSection) > len(logSection) {
+			spillPayload = res.Value
+			spillLabel = "object"
+		} else {
+			spillPayload = rawLogs
+			spillLabel = "stdout"
+		}
+		spillKey := store.SaveAutoSpill(spillPayload)
+		hint := ""
+		avail := totalAvail
+		if spillKey != "" {
+			sections[0] = fmt.Sprintf("[ptc ok | %d host ops | %dms | truncated preview — full %s saved in state.get('%s') / state.get('__last_result')]", len(res.Traces), res.DurationMs, spillLabel, spillKey)
+			hint = fmt.Sprintf("; full %s saved in state.get('%s') and state.get('__last_result') — filter/slice in code or pass maxOutputBytes", spillLabel, spillKey)
+			avail = maxOutBytes - len(sections[0]) - 24
+			if avail < 800 {
+				avail = 800
 			}
 		}
-		preview := output.TruncateHeadTailBytes("Result:\n"+serialized, availForResult, hint)
-		sections = append(sections, preview)
+
+		var logBudget, resBudget int
+		minShare := max(800, avail/3)
+		switch {
+		case len(resSection)+2 <= avail-minShare:
+			resBudget = len(resSection)
+			logBudget = avail - resBudget - 2
+		case len(logSection)+2 <= avail-minShare:
+			logBudget = len(logSection)
+			resBudget = avail - logBudget - 2
+		default:
+			logBudget = max(1200, avail/3)
+			resBudget = avail - logBudget - 2
+		}
+
+		if len(logSection) <= logBudget {
+			sections = append(sections, logSection)
+		} else {
+			sections = append(sections, output.TruncateHeadTailBytes(logSection, logBudget, hint))
+		}
+		if len(resSection) <= resBudget {
+			sections = append(sections, resSection)
+		} else {
+			sections = append(sections, output.TruncateHeadTailBytes(resSection, resBudget, hint))
+		}
 	}
 
 	joined := strings.Join(sections, "\n\n")

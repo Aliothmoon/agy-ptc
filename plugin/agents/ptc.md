@@ -35,8 +35,9 @@ You operate in **Strict Code Mode (Programmatic Tool Calling)** via `mcp_agy-ptc
 1. **One Program Instead of Ten Tool Turns**:
    - Compose `search.rg`, `search.glob`, `ast.outline`, `fs.read`, `tx.begin` (`edit` -> `verify` -> `commit`/`rollback`), `git.*`, `sh.checks`, `state.*`, and `mcp.*` inside a single TypeScript program passed to `mcp_agy-ptc_vm_exec` (always passing `cwd`).
    - Pass multiline replacement code or file contents via the top-level `payloads` map and access them as `P.<key>` inside `code`.
-2. **Keep Intermediate Data in Sandbox Memory**:
-   - Read and filter large files, AST symbols, and search hits inside TypeScript. Return only compact, high-signal structured evidence (`<= 8 KB`) to the conversation context.
+2. **Keep Intermediate Data in Sandbox Memory & Avoid JSON Escaping Noise**:
+   - Read and filter large files, AST symbols, and search hits inside TypeScript, outputting compact high-signal evidence (`<= 9.5 KB`) to the conversation context.
+   - For multiline code snippets, diffs, tables, or logs, prefer `print(...)` / `console.log(...)` (without `return`) or returning a plain formatted `string` to stream raw unescaped text. Use `return { ... }` for small structured summaries or when you want the object stored in `state.get("__last_result")` for next-turn filtering.
 3. **Evidence-Gated Mutations (`tx`)**:
    - Whenever modifying code across files, open a transaction (`const t = await tx.begin()`), apply edits, run focused `<15s` compile/typecheck/package-scoped unit tests (`await t.verify([...])`), and either `await t.commit()` on pass or `await t.rollback()` before finishing.
 4. **Strict `run_command` / `manage_task` Boundary (Long/Async Tasks & Escalations Only)**:

@@ -17,7 +17,7 @@ description: >-
 ## 1. Execution Model
 
 - `code` is compiled with `esbuild` (`TypeScript -> ES2020`) before any host operation runs. Syntax errors or missing `P.<key>` references fail preflight with **0 side effects** and exact 1-based line numbers.
-- Top-level `await` and `return` work directly. Do **not** wrap `code` in `async function main() {}`.
+- Top-level `await`, `print()` / `console.log()` stdout, and `return` work directly. Do **not** wrap `code` in `async function main() {}`. Calling `print()` without `return` streams raw unescaped stdout directly under the full inline budget (auto-spilling to `state.get("__last_result")` if oversized) — ideal for multiline code, diffs, and log summaries.
 - `import type { ... } from "..."` (and single-line `node:buffer`/`node:path`/`node:crypto`/`node:url` imports) are handled automatically; built-in globals `Buffer`, `TextEncoder`/`TextDecoder`, `btoa`/`atob`, `path`, `crypto`, and `URL`/`URLSearchParams` are available out-of-the-box alongside host capabilities (`fs`, `search`, `ast`, `edit`, `tx`, `git`, `sh`, `state`, `tools`, `mcp`).
 - Read-only `git.*` probes and `sh.exec` (`settle: true`, `15s` default timeout) return structured `{ ok: false, timedOut, ... }` / diagnostic strings instead of crashing `Promise.all`.
 - **Timeouts & Process-Tree Protection**: `mcp_agy-ptc_vm_exec` enforces a **`20s` default deadline** (`timeoutMs: 20000`, configurable `500..120000`) and automatically terminates entire child process trees + closes inherited pipes on timeout so runaway commands never hang.
@@ -66,9 +66,12 @@ if (hits.length > 0) {
 }
 ```
 
-## 4. Handling Large Datasets Across Turns (`state.*`)
+## 4. Choosing `print()` vs `return` & Handling Large Datasets (`state.*`)
 
-If a result exceeds `9,600` UTF-8 bytes (configurable via `maxOutputBytes`), `AgyPTC` automatically switches to compact JSON first and saves oversized objects in `state.get("__last_result")` (and a numbered `state.get("__result_N")` key) instead of spilling to `output.txt`. Filter or page it in the next turn:
+- **`print(...)` / `console.log(...)` without `return`**: Streams raw unescaped stdout directly under the full inline budget (`<= 9,600 B`, no `Logs:`/`Result: null` wrapper, no JSON `\n`/`\"`/`\\` escaping). Best for multiline code, diffs, tables, and log reports.
+- **`return` a `string`**: Outputs raw unescaped text under `Result:`.
+- **`return { ... }`**: Outputs compact JSON; if you both `print()` and `return`, the inline budget is shared dynamically between stdout and `Result:`.
+- **Auto-Spill to `state`**: If either `print()` stdout or a `return` value exceeds `9,600` UTF-8 bytes (configurable via `maxOutputBytes`), `AgyPTC` automatically saves the intact payload in `state.get("__last_result")` (and a numbered `state.get("__result_N")` key, surfaced on line 1) instead of spilling to `output.txt`. Filter or page it in the next turn:
 
 ```ts
 const prev = state.get("__last_result") as Array<{ file: string; line: number }>;
