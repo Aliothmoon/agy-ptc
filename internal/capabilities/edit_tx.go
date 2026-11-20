@@ -138,6 +138,7 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 			txMap[id] = &activeTx{
 				id:        id,
 				snapshots: map[string]fileSnapshot{},
+				touched:   []string{},
 			}
 			return map[string]any{"id": id, "status": "open"}, nil
 		},
@@ -265,7 +266,7 @@ func (b *EditTxBinder) Bind(env *sandbox.ExecutionEnv) error {
 }
 
 func rollbackSnapshots(tx *activeTx) []string {
-	var restored []string
+	restored := []string{}
 	for _, snap := range tx.snapshots {
 		if snap.existed {
 			_ = writeFilePreserveMode(snap.absPath, snap.origBytes)
@@ -285,7 +286,7 @@ func (b *EditTxBinder) applyFileSpecs(cwd string, specs []FileEditSpec, dryRun, 
 		return nil, errors.New("edits list cannot be empty")
 	}
 	var planned []plannedFileWrite
-	var failures []map[string]any
+	failures := []map[string]any{}
 
 	for _, spec := range specs {
 		absPath, err := b.Policy.ResolveAndCheckWrite(cwd, spec.Path)

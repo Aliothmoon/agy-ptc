@@ -99,3 +99,42 @@ func TestPolicyDesktopPluginDataPolicyOverride(t *testing.T) {
 		t.Fatal("expected blocked_dir write denied by PLUGIN_DATA/policy.json")
 	}
 }
+
+func TestPolicyCommandPrivEscQuoteAwareness(t *testing.T) {
+	eng := NewEngine(t.TempDir())
+
+	allowed := []string{
+		`adb -s 1558416067007OZ shell "getprop ro.product.model; getprop ro.build.version.release; getprop ro.product.cpu.abi; id; su -c id 2>/dev/null || echo NO_ROOT; pm list packages | grep -i -E 'maa|meow'; ps -A | grep -i -E 'maa|meow'; which simpleperf perfetto 2>&1"`,
+		`adb -s e867092c shell 'id; su -c id 2>/dev/null || echo NO_ROOT'`,
+		`rg "; sudo" internal/policy`,
+		`git log --grep="; su -" -n 5`,
+		"echo \"line1`nline2\"",
+	}
+	for _, cmd := range allowed {
+		if err := eng.CheckCommand(cmd); err != nil {
+			t.Fatalf("expected non-host quoted command allowed, got %v for: %s", err, cmd)
+		}
+	}
+
+	mustAsk := []string{
+		`sudo ls -la`,
+		`"sudo" ls -la`,
+		`s"u"do ls -la`,
+		`echo ok; su -`,
+		`echo ok && doas id`,
+		`echo ok | sudo tee /tmp/x`,
+		`sh -c "sudo id"`,
+		`"sh" -c "sudo id"`,
+		`sh -c "echo ok; sudo id"`,
+		`pwsh -NoProfile -Command "sudo id"`,
+		`adb -s 1558416067007OZ shell "$(sudo id)"`,
+		"adb -s 1558416067007OZ shell \"`sudo id`\"",
+		`adb -s 1558416067007OZ shell "su -c rm -rf /"`,
+		`adb -s 1558416067007OZ shell "reboot"`,
+	}
+	for _, cmd := range mustAsk {
+		if err := eng.CheckCommand(cmd); !IsApprovalRequired(err) {
+			t.Fatalf("expected APPROVAL_REQUIRED for %q, got: %v", cmd, err)
+		}
+	}
+}

@@ -214,8 +214,9 @@ func (e *Engine) ResolveAndCheckWrite(baseDir, targetPath string) (string, error
 	return abs, nil
 }
 
+var hostPrivEscPattern = regexp.MustCompile(`(?i)(?:^|[;&|(\n` + "`" + `]\s*)(?:env\s+(?:[^\s;|&]+\s+)*)?(?:[a-zA-Z0-9_./\\:-]*[/\\])?(?:sudo|su|doas)\b`)
+
 var destructiveCmdPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(?:^|[;&|]\s*)(?:sudo|su|doas)\b`),
 	regexp.MustCompile(`(?i)\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:/|~|\.\.|[a-zA-Z]:\\)`),
 	regexp.MustCompile(`(?i)\bRemove-Item\b.*-Recurse.*-Force\s+(?:/|~|\$HOME|\$env:USERPROFILE|[a-zA-Z]:\\$)`),
 	regexp.MustCompile(`(?i)\bgit\s+(?:push\b.*--force|push\b.*-f\b|reset\s+--hard|clean\s+-[a-zA-Z]*f)`),
@@ -228,6 +229,14 @@ func (e *Engine) CheckCommand(cmdLine string) error {
 	trimmed := strings.TrimSpace(cmdLine)
 	if trimmed == "" {
 		return errors.New("command cannot be empty")
+	}
+	if hostPrivEscPattern.MatchString(extractHostCommandSurface(trimmed, 0)) {
+		return &PolicyError{
+			Decision: DecisionAsk,
+			Action:   "command",
+			Target:   trimmed,
+			Reason:   "destructive, privilege-escalating, or remote-pipe shell command must go through native interactive approval",
+		}
 	}
 	for _, re := range destructiveCmdPatterns {
 		if re.MatchString(trimmed) {
@@ -250,6 +259,268 @@ func (e *Engine) CheckCommand(cmdLine string) error {
 		}
 	}
 	return nil
+}
+
+// extractHostCommandSurface strips literal quoted arguments of non-shell commands (e.g. `adb shell "...; su -c id"` or `rg "; sudo"`)
+// while keeping unquoted command boundaries, quoted command verbs (`"sudo"`, `s"u"do`), `$()` / backtick substitutions,
+// and local host-shell wrapper bodies (`sh -c`, `pwsh -Command`, `cmd /c`) intact.
+func extractHostCommandSurface(cmdLine string, depth int) string {
+	if depth > 6 {
+		return cmdLine
+	}
+	type shellPiece struct {
+		text       string
+		quoted     bool
+		joinBefore bool // true if immediately adjacent to previous piece with no whitespace (e.g. s"u"do or --grep="...")
+	}
+	var out strings.Builder
+	var segPieces []shellPiece
+	var substChunks []string
+
+	flushSegment := func(sep string) {
+		defer func() {
+			segPieces = nil
+			substChunks = nil
+			if sep != "" {
+				out.WriteString(sep)
+			}
+		}()
+		if len(segPieces) == 0 && len(substChunks) == 0 {
+			return
+		}
+		// Group pieces into whitespace-separated words so quoted or partially-quoted command verbs
+		// (like `"sudo" id`, `s"u"do id`, or `"sh" -c "sudo id"`) are recognized, while quoted
+		// argument parts (like `--grep="; su -"` or `adb shell "...; su -c id"`) are stripped.
+		type word struct {
+			raw          string
+			unquotedOnly string
+			hasQuoted    bool
+		}
+		var words []word
+		for _, p := range segPieces {
+			if !p.quoted {
+				fields := strings.Fields(p.text)
+				if len(fields) == 0 {
+					continue
+				}
+				startsWithWS := len(p.text) > 0 && (p.text[0] == ' ' || p.text[0] == '\t')
+				for fi, f := range fields {
+					if fi == 0 && p.joinBefore && !startsWithWS && len(words) > 0 {
+						w := &words[len(words)-1]
+						w.raw += f
+						w.unquotedOnly += f
+					} else {
+						words = append(words, word{raw: f, unquotedOnly: f})
+					}
+				}
+			} else {
+				if p.joinBefore && len(words) > 0 {
+					w := &words[len(words)-1]
+					w.raw += p.text
+					w.unquotedOnly += `""`
+					w.hasQuoted = true
+				} else {
+					words = append(words, word{raw: p.text, unquotedOnly: `""`, hasQuoted: true})
+				}
+			}
+		}
+
+		verb := ""
+		verbWordIdx := -1
+		for wi, w := range words {
+			if isEnvPrefixToken(w.raw) {
+				continue
+			}
+			verb = normalizeCmdVerb(w.raw)
+			verbWordIdx = wi
+			break
+		}
+		isShell := isHostShellWrapper(verb)
+
+		for wi, w := range words {
+			if wi > 0 {
+				out.WriteByte(' ')
+			}
+			if wi <= verbWordIdx {
+				out.WriteString(w.raw)
+			} else if isShell && w.hasQuoted {
+				out.WriteString("; ")
+				out.WriteString(extractHostCommandSurface(w.raw, depth+1))
+			} else if isShell {
+				out.WriteString(w.raw)
+			} else {
+				out.WriteString(w.unquotedOnly)
+			}
+		}
+		for _, sc := range substChunks {
+			out.WriteString(" ; ")
+			out.WriteString(extractHostCommandSurface(sc, depth+1))
+		}
+	}
+
+	var cur strings.Builder
+	lastEndedWithWS := true
+	flushUnquoted := func() {
+		if cur.Len() > 0 {
+			txt := cur.String()
+			segPieces = append(segPieces, shellPiece{text: txt, quoted: false, joinBefore: !lastEndedWithWS})
+			last := txt[len(txt)-1]
+			lastEndedWithWS = last == ' ' || last == '\t'
+			cur.Reset()
+		}
+	}
+
+	n := len(cmdLine)
+	for i := 0; i < n; i++ {
+		ch := cmdLine[i]
+		switch ch {
+		case '\'':
+			flushUnquoted()
+			joinBefore := !lastEndedWithWS
+			start := i + 1
+			i++
+			for i < n && cmdLine[i] != '\'' {
+				i++
+			}
+			segPieces = append(segPieces, shellPiece{text: cmdLine[start:i], quoted: true, joinBefore: joinBefore})
+			lastEndedWithWS = false
+		case '"':
+			flushUnquoted()
+			joinBefore := !lastEndedWithWS
+			var q strings.Builder
+			i++
+			for i < n && cmdLine[i] != '"' {
+				if cmdLine[i] == '\\' && i+1 < n && (cmdLine[i+1] == '"' || cmdLine[i+1] == '\\' || cmdLine[i+1] == '$' || cmdLine[i+1] == '`') {
+					q.WriteByte(cmdLine[i+1])
+					i += 2
+					continue
+				}
+				if cmdLine[i] == '$' && i+1 < n && cmdLine[i+1] == '(' {
+					sub, nextIdx := scanCommandSubst(cmdLine, i+2)
+					substChunks = append(substChunks, sub)
+					i = nextIdx + 1
+					continue
+				}
+				if cmdLine[i] == '`' {
+					if sub, nextIdx, closed := scanBacktickSubst(cmdLine, i+1); closed {
+						substChunks = append(substChunks, sub)
+						i = nextIdx + 1
+						continue
+					}
+				}
+				q.WriteByte(cmdLine[i])
+				i++
+			}
+			segPieces = append(segPieces, shellPiece{text: q.String(), quoted: true, joinBefore: joinBefore})
+			lastEndedWithWS = false
+		case '$':
+			if i+1 < n && cmdLine[i+1] == '(' {
+				sub, nextIdx := scanCommandSubst(cmdLine, i+2)
+				substChunks = append(substChunks, sub)
+				i = nextIdx
+				continue
+			}
+			cur.WriteByte(ch)
+		case '`':
+			if sub, nextIdx, closed := scanBacktickSubst(cmdLine, i+1); closed {
+				substChunks = append(substChunks, sub)
+				i = nextIdx
+				continue
+			}
+			cur.WriteByte(ch)
+		case ';', '\n', '(', ')':
+			flushUnquoted()
+			flushSegment(string(ch))
+			lastEndedWithWS = true
+		case '&', '|':
+			flushUnquoted()
+			if i+1 < n && cmdLine[i+1] == ch {
+				flushSegment(cmdLine[i : i+2])
+				i++
+			} else {
+				flushSegment(string(ch))
+			}
+			lastEndedWithWS = true
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	flushUnquoted()
+	flushSegment("")
+	return out.String()
+}
+
+func scanCommandSubst(s string, start int) (string, int) {
+	depth := 1
+	var b strings.Builder
+	i := start
+	for i < len(s) && depth > 0 {
+		c := s[i]
+		if c == '(' {
+			depth++
+		} else if c == ')' {
+			depth--
+			if depth == 0 {
+				return b.String(), i
+			}
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String(), len(s) - 1
+}
+
+func scanBacktickSubst(s string, start int) (string, int, bool) {
+	var b strings.Builder
+	i := start
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			b.WriteByte(s[i+1])
+			i += 2
+			continue
+		}
+		if s[i] == '`' {
+			return b.String(), i, true
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return "", start, false
+}
+
+func isEnvPrefixToken(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	name := tok[:eq]
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9' && i > 0) || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeCmdVerb(tok string) string {
+	tok = strings.TrimSpace(tok)
+	if idx := strings.LastIndexAny(tok, `/\`); idx >= 0 {
+		tok = tok[idx+1:]
+	}
+	tok = strings.ToLower(tok)
+	for _, ext := range []string{".exe", ".cmd", ".bat"} {
+		tok = strings.TrimSuffix(tok, ext)
+	}
+	return tok
+}
+
+func isHostShellWrapper(verb string) bool {
+	switch verb {
+	case "sh", "bash", "zsh", "dash", "ksh", "ash", "pwsh", "powershell", "cmd":
+		return true
+	}
+	return false
 }
 
 // CheckMCP validates external MCP bridge invocations against mcp(server/tool) rules.

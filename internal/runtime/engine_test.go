@@ -403,7 +403,7 @@ func TestSubprocessTreeTimeoutDoesNotHangAndTxAutoRollsBack(t *testing.T) {
 		t.Fatalf("unexpected sh.exec timeout envelope: %s", outSh)
 	}
 
-	// 2. Outer ptc_exec TimeoutMs (650ms) during an active tx.verify with a hung child tree must:
+	// 2. Outer vm_exec TimeoutMs (650ms) during an active tx.verify with a hung child tree must:
 	//    a) terminate the child tree without hanging cmd.Run()
 	//    b) roll back uncommitted tx edits cleanly after child exit
 	//    c) include culprit op + recovery hint in [ptc timeout error]
@@ -419,7 +419,7 @@ func TestSubprocessTreeTimeoutDoesNotHangAndTxAutoRollsBack(t *testing.T) {
 		`,
 	})
 	if !isErrOuter {
-		t.Fatalf("expected outer ptc_exec timeout error, got success: %s", outOuter)
+		t.Fatalf("expected outer vm_exec timeout error, got success: %s", outOuter)
 	}
 	if !strings.Contains(outOuter, "[ptc timeout error") || !strings.Contains(outOuter, "run_command") {
 		t.Fatalf("expected structured timeout envelope with run_command hint, got: %s", outOuter)
@@ -540,5 +540,83 @@ func TestStandardNodeAndWebGlobalsBufferCryptoPathTextCodec(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing expected assertion %s in output:\n%s", want, out)
 		}
+	}
+}
+
+func TestEmptyCollectionsReturnArraysAndLargeFileRangeReadWorks(t *testing.T) {
+	ws := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(ws, "empty_dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(ws, "empty.go"), []byte("package empty\n// no symbols\n"), 0o644)
+
+	// >2MB text file to verify bounded fs.read(path, { startLine, endLine }) works and full-read hint avoids nonexistent fs.readLines()
+	var bigBuf strings.Builder
+	for i := 1; i <= 45000; i++ {
+		bigBuf.WriteString("0123456789abcdef0123456789abcdef0123456789abcdef_line\n")
+	}
+	_ = os.WriteFile(filepath.Join(ws, "big.log"), []byte(bigBuf.String()), 0o644)
+
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			const tree = await fs.tree("empty_dir", 3);
+			const list = await fs.list("empty_dir");
+			const outl = await ast.outline("empty.go");
+			const sliced = tree.slice(0, 10);
+			const sliceText = await fs.read("big.log", { startLine: 100, endLine: 102, lineNumbers: true });
+			let fullErr = "";
+			try {
+				await fs.read("big.log");
+			} catch (e) {
+				fullErr = String(e);
+			}
+			return {
+				treeIsArr: Array.isArray(tree),
+				listIsArr: Array.isArray(list),
+				symsIsArr: Array.isArray(outl.symbols),
+				slicedLen: sliced.length,
+				sliceText,
+				hasReadLinesTypo: fullErr.includes("readLines"),
+			};
+		`,
+	})
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	for _, needle := range []string{
+		`"treeIsArr": true`,
+		`"listIsArr": true`,
+		`"symsIsArr": true`,
+		`"slicedLen": 0`,
+		`100: 0123456789abcdef`,
+		`"hasReadLinesTypo": false`,
+	} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("expected %q in output, got: %s", needle, out)
+		}
+	}
+}
+
+func TestPromiseAllSiblingErrorCancelsShellWithoutFalseTimeout(t *testing.T) {
+	ws := t.TempDir()
+	eng := NewEngine(t.TempDir(), ws)
+	defer eng.Close()
+
+	out, isErr := eng.RunMCPExec(context.Background(), ExecInput{
+		Cwd: ws,
+		Code: `
+			await Promise.all([
+				fs.read("definitely_missing.txt"),
+				sh.exec("node -e \"setTimeout(() => {}, 4000)\"")
+			]);
+		`,
+	})
+	if !isErr {
+		t.Fatalf("expected error from missing file, got: %s", out)
+	}
+	if strings.Contains(out, "TIMED OUT") {
+		t.Fatalf("canceled sibling sh.exec must not misreport TIMED OUT, got: %s", out)
 	}
 }

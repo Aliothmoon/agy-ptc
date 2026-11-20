@@ -142,7 +142,7 @@ func extractGoASTSymbols(absPath string, src []byte, lines []string) ([]SymbolIn
 		return nil, false
 	}
 
-	var syms []SymbolInfo
+	syms := []SymbolInfo{}
 	for _, decl := range fileNode.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
@@ -237,7 +237,7 @@ func extractGenericSymbols(ext string, lines []string) []SymbolInfo {
 }
 
 func extractBraceSymbols(lines []string, declRe *regexp.Regexp) []SymbolInfo {
-	var syms []SymbolInfo
+	syms := []SymbolInfo{}
 	for i := 0; i < len(lines); i++ {
 		m := declRe.FindStringSubmatch(lines[i])
 		if len(m) < 3 {
@@ -292,7 +292,7 @@ func findBraceEnd(lines []string, startIdx int) int {
 }
 
 func extractIndentSymbols(lines []string) []SymbolInfo {
-	var syms []SymbolInfo
+	syms := []SymbolInfo{}
 	for i := 0; i < len(lines); i++ {
 		m := pySymRegex.FindStringSubmatch(lines[i])
 		if len(m) < 4 {
@@ -337,7 +337,7 @@ func countIndent(s string) int {
 }
 
 func extractMarkdownSections(lines []string) []SymbolInfo {
-	var syms []SymbolInfo
+	syms := []SymbolInfo{}
 	var levels []int
 	for i, line := range lines {
 		m := mdHeadRegex.FindStringSubmatch(line)

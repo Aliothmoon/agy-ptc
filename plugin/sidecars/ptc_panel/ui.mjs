@@ -536,7 +536,7 @@ export function buildUiHtml() {
       const txt = document.getElementById('live-text');
       dot.className = 'dot ' + (ls.active ? 'active' : (ls.lastStatus && ls.lastStatus !== 'ok' && ls.lastStatus !== 'idle' ? 'err' : 'ok'));
       txt.textContent = ls.active
-        ? (t('runningPrefix') + (ls.title || ls.currentOp || 'ptc_exec'))
+        ? (t('runningPrefix') + (ls.title || ls.currentOp || 'vm_exec'))
         : (ls.lastStatus && ls.lastStatus !== 'idle' ? (t('recentPrefix') + ls.lastStatus + ' · ' + (ls.lastDurationMs || 0) + 'ms') : t('ready'));
 
       document.getElementById('st-total').textContent = st.totalRuns ?? 0;

@@ -125,7 +125,7 @@ func (e *Engine) RunMCPExec(ctx context.Context, in ExecInput) (text string, isE
 
 	title := strings.TrimSpace(in.Title)
 	if title == "" {
-		title = "ptc_exec"
+		title = "vm_exec"
 	}
 
 	timeout := sandbox.EffectiveDefaultTimeout()
@@ -458,7 +458,7 @@ func formatErrorEnvelope(ee *sandbox.ExecutionError, maxOutBytes int) string {
 		if len(culprits) > 0 {
 			sections = append(sections, "Interrupted / timed-out operations (child process trees terminated):\n"+strings.Join(culprits, "\n"))
 		}
-		sections = append(sections, "Timeout recovery hint:\n  Keep ptc_exec fast (<15s). Pass a larger `timeoutMs` (up to 120000) for moderate checks, or use built-in `run_command` (`WaitMsBeforeAsync: 500..2000` / `IsDaemon: true`) + `manage_task` for >15s builds, full test suites, and dev servers.")
+		sections = append(sections, "Timeout recovery hint:\n  Keep mcp_agy-ptc_vm_exec fast (<15s). Pass a larger `timeoutMs` (up to 120000) for moderate checks, or use built-in `run_command` (`WaitMsBeforeAsync: 500..2000` / `IsDaemon: true`) + `manage_task` for >15s builds, full test suites, and dev servers.")
 	}
 
 	// Like pi-fabric: list completed host calls before failure so the model doesn't blindly repeat non-idempotent side effects!

@@ -247,14 +247,16 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 
 	runErr := cmd.Run()
 	durMs := time.Since(start).Milliseconds()
-	parentCanceled := parentCtx.Err() != nil
-	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(runErr, exec.ErrWaitDelay) || parentCanceled
+	parentErr := parentCtx.Err()
+	parentTimedOut := errors.Is(parentErr, context.DeadlineExceeded)
+	parentAborted := parentErr != nil && !parentTimedOut
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(runErr, exec.ErrWaitDelay) || parentTimedOut
 	exitCode := 0
 	spawnErr := ""
 
 	if runErr != nil {
 		var exitErr *exec.ExitError
-		if timedOut {
+		if timedOut || parentAborted {
 			exitCode = -1
 		} else if errors.As(runErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
@@ -266,7 +268,7 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 
 	// Inside sandbox memory (compact=false), preserve up to 256 KB so guest TypeScript can JSON.parse(r.output) or filter full stdout without truncation!
 	maxCmdBytes := 256 * 1024
-	if compact || timedOut || parentCanceled {
+	if compact || timedOut || parentErr != nil {
 		maxCmdBytes = 8000
 	}
 	formatted := output.FormatCommandOutput(output.CommandFormatParams{
@@ -281,10 +283,17 @@ func (b *ShellGitBinder) RunSingleCommandDuration(parentCtx context.Context, cwd
 	if timedOut {
 		formatted = fmt.Sprintf("TIMED OUT after %dms (process tree terminated; for >15s long tasks use built-in run_command + manage_task)\n%s", durMs, strings.TrimPrefix(strings.TrimPrefix(formatted, "TIMED OUT\n"), "TIMED OUT (no output)"))
 		formatted = strings.TrimSpace(formatted)
+	} else if parentAborted {
+		msg := strings.TrimSpace(formatted)
+		if msg == "" || msg == "(no output)" {
+			formatted = fmt.Sprintf("CANCELED after %dms (outer execution already ended)", durMs)
+		} else {
+			formatted = fmt.Sprintf("CANCELED after %dms (outer execution already ended)\n%s", durMs, msg)
+		}
 	}
 
-	// If the outer ptc_exec deadline fired, return an error so the sandbox trace captures the partial stdout/stderr for [ptc timeout error]!
-	if parentCanceled {
+	// If the outer vm_exec deadline or cancellation fired, return an error so the sandbox trace captures the partial stdout/stderr!
+	if parentErr != nil {
 		return nil, fmt.Errorf("%s", formatted)
 	}
 
@@ -539,7 +548,7 @@ func runGitStructuredStatus(ctx context.Context, cwd string) (map[string]any, er
 	}
 	lines := strings.Split(raw, "\n")
 	branch := ""
-	var staged, modified, untracked []string
+	staged, modified, untracked := []string{}, []string{}, []string{}
 	for _, line := range lines {
 		if line == "" {
 			continue

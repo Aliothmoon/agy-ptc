@@ -135,7 +135,7 @@ func (m *MCPBridge) Bind(env *sandbox.ExecutionEnv) error {
 				limit = 100
 			}
 			catalog := m.buildCatalog(env.Cwd, false)
-			var filtered []ToolDescriptor
+			filtered := []ToolDescriptor{}
 			for _, item := range catalog {
 				if providerFilter != "" && item.Provider != providerFilter && !strings.HasPrefix(item.Ref, providerFilter+".") {
 					continue

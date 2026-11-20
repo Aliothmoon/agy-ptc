@@ -88,8 +88,16 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if info.IsDir() {
 				return nil, fmt.Errorf("path '%s' is a directory; use fs.list() or fs.tree()", targetPath)
 			}
+			startLine := optInt(opts, "startLine", optInt(opts, "offset", 0))
+			endLine := optInt(opts, "endLine", 0)
+			limit := optInt(opts, "limit", 0)
+			hasRange := startLine > 0 || endLine > 0 || limit > 0
+			withNumbers := optBool(opts, "lineNumbers", false)
 			if info.Size() > MaxSandboxReadBytes {
-				return nil, fmt.Errorf("file '%s' (%d bytes) exceeds 2MB sandbox read cap; use search.rg() or pass startLine/endLine via fs.readLines()", targetPath, info.Size())
+				if !hasRange {
+					return nil, fmt.Errorf("file '%s' (%d bytes) exceeds 2MB sandbox read cap; use search.rg() or pass { startLine, endLine } to fs.read()", targetPath, info.Size())
+				}
+				return readBoundedLineRange(absPath, targetPath, startLine, endLine, limit, withNumbers)
 			}
 			raw, err := os.ReadFile(absPath)
 			if err != nil {
@@ -99,10 +107,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 				return nil, fmt.Errorf("file '%s' appears to be binary", targetPath)
 			}
 			text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-			startLine := optInt(opts, "startLine", optInt(opts, "offset", 0))
-			endLine := optInt(opts, "endLine", 0)
-			limit := optInt(opts, "limit", 0)
-			if startLine > 0 || endLine > 0 || limit > 0 {
+			if hasRange {
 				lines := strings.Split(text, "\n")
 				s := maxInt(1, startLine)
 				e := len(lines)
@@ -117,7 +122,6 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 				if e < s {
 					return "", fmt.Errorf("invalid range: startLine (%d) > endLine (%d)", s, e)
 				}
-				withNumbers := optBool(opts, "lineNumbers", false)
 				selected := lines[s-1 : e]
 				if withNumbers {
 					numbered := make([]string, len(selected))
@@ -211,7 +215,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 				return nil, err
 			}
 			limit := optInt(opts, "limit", 200)
-			var items []map[string]any
+			items := []map[string]any{}
 			for _, e := range entries {
 				if len(items) >= limit {
 					break
@@ -719,7 +723,7 @@ func matchSimpleGlob(globPat, fullSlash, baseName string) bool {
 }
 
 func buildTreeList(root string, maxDepth, maxItems int) []string {
-	var out []string
+	out := []string{}
 	var walk func(dir, relPrefix string, depth int)
 	walk = func(dir, relPrefix string, depth int) {
 		if depth > maxDepth || len(out) >= maxItems {
@@ -753,4 +757,61 @@ func buildTreeList(root string, maxDepth, maxItems int) []string {
 	}
 	walk(root, "", 1)
 	return out
+}
+
+func readBoundedLineRange(absPath, targetPath string, startLine, endLine, limit int, withNumbers bool) (string, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	s := maxInt(1, startLine)
+	e := endLine
+	if e <= 0 && limit > 0 {
+		e = s + limit - 1
+	}
+	if e <= 0 {
+		e = s + 499
+	}
+	if e < s {
+		return "", fmt.Errorf("invalid range: startLine (%d) > endLine (%d)", s, e)
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), MaxSandboxReadBytes)
+	var selected []string
+	totalBytes := 0
+	lineNum := 0
+	for scanner.Scan() {
+		rawLine := scanner.Bytes()
+		lineNum++
+		if bytes.IndexByte(rawLine, 0) >= 0 || !utf8.Valid(rawLine) {
+			return "", fmt.Errorf("file '%s' appears to be binary", targetPath)
+		}
+		if lineNum >= s && lineNum <= e {
+			clean := string(rawLine)
+			if withNumbers {
+				clean = fmt.Sprintf("%d: %s", lineNum, clean)
+			}
+			totalBytes += len(clean) + 1
+			if totalBytes > MaxSandboxReadBytes {
+				return "", fmt.Errorf("requested line range from '%s' exceeds 2MB sandbox read cap; request fewer lines", targetPath)
+			}
+			selected = append(selected, clean)
+		}
+		if lineNum >= e {
+			break
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		if errors.Is(scanErr, bufio.ErrTooLong) {
+			return "", fmt.Errorf("line %d in '%s' exceeds 2MB sandbox line cap; use search.rg()", lineNum+1, targetPath)
+		}
+		return "", scanErr
+	}
+	if len(selected) == 0 {
+		return "", nil
+	}
+	return strings.Join(selected, "\n"), nil
 }
