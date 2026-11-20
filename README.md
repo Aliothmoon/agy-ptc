@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path, { detail? })` -> `string[]` (dirs end with `/`) · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })` (2 MB/file sandbox cap) · `fs.cat(paths, opts?)` -> `{ [path]: text | null }` (parallel; unreadable files -> `null` + Warning) · `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` (`mv`) · `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` -> `string[]`; `{ detail: true }` -> `[{ name, isDir, size }]` (dir names end with `/` in both) · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults?, filesOnly?, count? })`
 - `search.glob(pattern, { path?, maxResults? })` (supports `{a,b}` braces + automatic fallback recovery)
 - **External Paths**: Relative paths resolve against `cwd`; external non-sensitive paths (`D:/OtherRepo/...`, `../shared/...`) are also supported across all capabilities unless disabled by policy.
@@ -196,7 +196,7 @@ if (found.length > 0) {
   return { ref: schema.ref, preview: res.text.slice(0, 400) };
 }
 ```
-- If a return value exceeds `9,600` UTF-8 bytes (or custom `maxOutputBytes`), `AgyPTC` automatically compacts JSON whitespace first, and if still larger, returns a head+tail preview inline while storing the full object in `state.get("__last_result")` (and `state.get("__result_N")`) for zero-cost slicing in the next turn.
+- If output exceeds `9,600` UTF-8 bytes, the full value is saved in `state.get("__last_result")` (and `state.get("__result_N")`). Long text (`print()` or a string result) is shown **page by page** at line boundaries with a footer like `[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]`; objects show a compact preview plus their `Shape` and the `Largest results` that produced them. Don't raise `maxOutputBytes` past ~10 KB: Antigravity spills larger MCP output to `output.txt`; read whole files with native `read_file` instead.
 
 ### Errors
 Host failures throw a JS `Error` with a semantic `name` and a one-line `message` (`"op: detail"`); uncaught ones point at your line (`at code:N  <source>`):

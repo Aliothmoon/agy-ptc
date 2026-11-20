@@ -274,7 +274,7 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			items := []map[string]any{}
 			for _, e := range entries {
 				if len(names)+len(items) >= limit {
-					env.AddWarning(fmt.Sprintf("fs.list: capped at %d entries; pass { limit }", limit))
+					env.AddWarning(fmt.Sprintf("fs.list: capped at %d of %d entries; pass { limit }", limit, len(entries)))
 					break
 				}
 				if !detail {
@@ -291,8 +291,12 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 				if info != nil {
 					sz = info.Size()
 				}
+				name := e.Name()
+				if e.IsDir() {
+					name += "/" // same convention as the string form
+				}
 				items = append(items, map[string]any{
-					"name":  e.Name(),
+					"name":  name,
 					"isDir": e.IsDir(),
 					"size":  sz,
 				})
@@ -370,9 +374,9 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if q.mode != "" {
 				return b.runListSearch(ctx, env, searchRoot, q)
 			}
-			hits, err := b.runTextOrRegexSearch(ctx, env.Cwd, searchRoot, q)
+			hits, total, err := b.runTextOrRegexSearch(ctx, env.Cwd, searchRoot, q)
 			if err == nil && len(hits) >= q.maxResults {
-				env.AddWarning(fmt.Sprintf("search.rg: capped at %d hits; narrow path/glob or pass { maxResults }", q.maxResults))
+				env.AddWarning(fmt.Sprintf("search.rg: capped at %d%s hits; narrow path/glob, pass { maxResults }, or use { count: true } for totals", q.maxResults, ofTotal(total)))
 			}
 			if cut := countCutLines(hits); cut > 0 {
 				env.AddWarning(fmt.Sprintf("search.rg: %d long line(s) cut at %dB; fs.read the line range for full text", cut, MaxSearchLineBytes))
@@ -396,12 +400,12 @@ func (b *FSSearchBinder) Bind(env *sandbox.ExecutionEnv) error {
 			if maxResults > 5000 {
 				maxResults = 5000
 			}
-			files, note, err := b.runGlobSearch(ctx, env.Cwd, searchRoot, pat, maxResults)
+			files, total, note, err := b.runGlobSearch(ctx, env.Cwd, searchRoot, pat, maxResults)
 			if err != nil {
 				return nil, err
 			}
-			if len(files) >= maxResults {
-				env.AddWarning(fmt.Sprintf("search.glob: capped at %d files; narrow path or pass { maxResults }", maxResults))
+			if total > len(files) {
+				env.AddWarning(fmt.Sprintf("search.glob: capped at %d of %d files; narrow path or pass { maxResults }", len(files), total))
 			}
 			if optBool(opts, "withMeta", false) {
 				return map[string]any{"files": files, "note": note}, nil
@@ -494,20 +498,22 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 	return q, nil
 }
 
-func (b *FSSearchBinder) runTextOrRegexSearch(ctx context.Context, workspaceCwd, searchRoot string, q searchQuery) ([]SearchHit, error) {
+// runTextOrRegexSearch returns hits and the total number of matches (-1 when unknown, e.g. Go fallback).
+func (b *FSSearchBinder) runTextOrRegexSearch(ctx context.Context, workspaceCwd, searchRoot string, q searchQuery) ([]SearchHit, int, error) {
 	if rgBin := b.resolveRg(); rgBin != "" {
-		hits, err := runRgJSON(ctx, rgBin, workspaceCwd, searchRoot, q)
+		hits, total, err := runRgJSON(ctx, rgBin, workspaceCwd, searchRoot, q)
 		if err == nil {
-			return hits, nil
+			return hits, total, nil
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, -1, ctx.Err()
 		}
 	}
-	return runGoFallbackSearch(ctx, workspaceCwd, searchRoot, q)
+	hits, err := runGoFallbackSearch(ctx, workspaceCwd, searchRoot, q)
+	return hits, -1, err
 }
 
-func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q searchQuery) ([]SearchHit, error) {
+func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q searchQuery) ([]SearchHit, int, error) {
 	rgArgs := []string{"--json", "--line-number", "--column", "--no-heading", "--color=never"}
 	if q.literal {
 		rgArgs = append(rgArgs, "--fixed-strings")
@@ -540,16 +546,16 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && rgCtx.Err() == nil {
 			if exitErr.ExitCode() == 1 {
-				return []SearchHit{}, nil
+				return []SearchHit{}, 0, nil
 			}
 			if exitErr.ExitCode() == 2 {
-				return nil, fmt.Errorf("invalid search pattern: %s", strings.TrimSpace(stderr.String()))
+				return nil, -1, fmt.Errorf("invalid search pattern: %s", strings.TrimSpace(stderr.String()))
 			}
 		}
 		if rgCtx.Err() != nil {
-			return nil, fmt.Errorf("search.rg timed out: %w", rgCtx.Err())
+			return nil, -1, fmt.Errorf("search.rg timed out: %w", rgCtx.Err())
 		}
-		return nil, err
+		return nil, -1, err
 	}
 
 	type rgEvent struct {
@@ -572,6 +578,7 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 	}
 
 	hits := []SearchHit{}
+	total := 0
 	// Context lines arrive as separate "context" events (and adjacent matches double as context),
 	// so keep a rolling window for `before` and extend recent hits' `after` as later lines stream in.
 	type seenLine struct {
@@ -590,15 +597,15 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 		}
 		switch ev.Type {
 		case "begin":
-			if full {
-				return hits, nil
-			}
 			window = window[:0]
 			fileStart = len(hits)
 			continue
 		case "match", "context":
 		default:
 			continue
+		}
+		if ev.Type == "match" {
+			total++
 		}
 		n := ev.Data.LineNumber
 		lineText := strings.TrimRight(ev.Data.Lines.Text, "\r\n")
@@ -633,9 +640,6 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 			}
 			hits = append(hits, hit)
 			full = len(hits) >= q.maxResults
-			if full && q.contextLines == 0 {
-				return hits, nil
-			}
 		}
 		if q.contextLines > 0 {
 			window = append(window, seenLine{n, lineText})
@@ -644,7 +648,10 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 			}
 		}
 	}
-	return hits, nil
+	if stdout.droppedBytes() > 0 {
+		total = -1 // rg output overflowed the buffer: true total unknown
+	}
+	return hits, total, nil
 }
 
 func runGoFallbackSearch(ctx context.Context, workspaceCwd, searchRoot string, q searchQuery) ([]SearchHit, error) {
@@ -738,13 +745,16 @@ func runGoFallbackSearch(ctx context.Context, workspaceCwd, searchRoot string, q
 	return hits, nil
 }
 
-func (b *FSSearchBinder) runGlobSearch(ctx context.Context, workspaceCwd, searchRoot, pattern string, maxResults int) ([]string, string, error) {
+// runGlobSearch returns up to maxResults files plus the total number of matches.
+func (b *FSSearchBinder) runGlobSearch(ctx context.Context, workspaceCwd, searchRoot, pattern string, maxResults int) ([]string, int, string, error) {
 	if maxResults <= 0 {
 		maxResults = 200
 	}
 	allFiles := collectWorkspaceFiles(ctx, searchRoot)
+	total := 0
 	matchFiles := func(pat string) []string {
 		var matched []string
+		total = 0
 		for _, abs := range allFiles {
 			relToSearch, err := filepath.Rel(searchRoot, abs)
 			if err != nil {
@@ -752,9 +762,9 @@ func (b *FSSearchBinder) runGlobSearch(ctx context.Context, workspaceCwd, search
 			}
 			relSlash := filepath.ToSlash(relToSearch)
 			if matchGlobPattern(pat, relSlash) {
-				matched = append(matched, relDisplayPath(workspaceCwd, abs))
-				if len(matched) >= maxResults {
-					break
+				total++
+				if len(matched) < maxResults {
+					matched = append(matched, relDisplayPath(workspaceCwd, abs))
 				}
 			}
 		}
@@ -764,7 +774,7 @@ func (b *FSSearchBinder) runGlobSearch(ctx context.Context, workspaceCwd, search
 
 	exact := matchFiles(pattern)
 	if len(exact) > 0 {
-		return exact, "", nil
+		return exact, total, "", nil
 	}
 
 	// Smart fallback 1 (inspired by agy-fast v0.2.2): expand regex alternation `a|b` mistakenly passed to glob
@@ -772,7 +782,7 @@ func (b *FSSearchBinder) runGlobSearch(ctx context.Context, workspaceCwd, search
 		expanded := "*{" + strings.ReplaceAll(pattern, "|", ",") + "}*"
 		recovered := matchFiles(expanded)
 		if len(recovered) > 0 {
-			return recovered, fmt.Sprintf("auto-expanded regex '|' to glob '%s'", expanded), nil
+			return recovered, total, fmt.Sprintf("auto-expanded regex '|' to glob '%s'", expanded), nil
 		}
 	}
 
@@ -780,22 +790,23 @@ func (b *FSSearchBinder) runGlobSearch(ctx context.Context, workspaceCwd, search
 	if !strings.ContainsAny(pattern, "*?[]{}/\\.") {
 		sub := strings.ToLower(pattern)
 		var recovered []string
+		total = 0
 		for _, abs := range allFiles {
 			rel := relDisplayPath(workspaceCwd, abs)
 			if strings.Contains(strings.ToLower(rel), sub) {
-				recovered = append(recovered, rel)
-				if len(recovered) >= maxResults {
-					break
+				total++
+				if len(recovered) < maxResults {
+					recovered = append(recovered, rel)
 				}
 			}
 		}
 		sort.Strings(recovered)
 		if len(recovered) > 0 {
-			return recovered, fmt.Sprintf("bare keyword matched as '*%s*'", pattern), nil
+			return recovered, total, fmt.Sprintf("bare keyword matched as '*%s*'", pattern), nil
 		}
 	}
 
-	return []string{}, "", nil
+	return []string{}, 0, "", nil
 }
 
 func collectWorkspaceFiles(ctx context.Context, root string) []string {
@@ -1018,4 +1029,12 @@ func countCutLines(hits []SearchHit) int {
 		}
 	}
 	return n
+}
+
+// ofTotal renders " of N" for cap warnings when the total is known.
+func ofTotal(total int) string {
+	if total < 0 {
+		return ""
+	}
+	return fmt.Sprintf(" of %d", total)
 }

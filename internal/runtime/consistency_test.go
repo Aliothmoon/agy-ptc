@@ -18,7 +18,7 @@ return { names: names.join(","), endsWith: names.filter((n) => n.endsWith(".rs")
 	if isErr {
 		t.Fatalf("unexpected error: %s", out)
 	}
-	mustContainAll(t, out, `"names": "lib.rs,sub/"`, `"endsWith": 1`, `"dir": "sub"`)
+	mustContainAll(t, out, `"names": "lib.rs,sub/"`, `"endsWith": 1`, `"dir": "sub/"`)
 }
 
 func TestFsExistsThrowsOnBlockedPath(t *testing.T) {

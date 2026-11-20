@@ -356,7 +356,7 @@ func execToolDefinition() map[string]any {
 					"type":        "integer",
 					"minimum":     1000,
 					"maximum":     524288,
-					"description": "Optional max UTF-8 bytes returned inline (default 9600 to stay below Antigravity CLI's ~10KB output.txt spill cliff; increase up to 524288 when larger raw output is explicitly desired).",
+					"description": "Optional max UTF-8 bytes returned inline (default 9600). Above ~10000 Antigravity spills the response to output.txt, so keep the default: long text is paged (print(state.page(2)) for the next page) and whole files are best read with native read_file.",
 				},
 			},
 			"required": []string{"code", "cwd"},

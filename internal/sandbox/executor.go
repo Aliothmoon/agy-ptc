@@ -701,6 +701,7 @@ func Execute(parentCtx context.Context, req ExecRequest, binders ...Binder) (res
 		}
 		formattedMsg := compiler.FormatRuntimeError(msg, cr)
 		formattedMsg = enrichUnknownMethodError(vm, formattedMsg, cr)
+		formattedMsg = addTypeHint(formattedMsg)
 		formattedMsg = compiler.CleanStack(formattedMsg, cr)
 		return nil, &ExecutionError{
 			Phase:      "runtime",
@@ -735,6 +736,7 @@ func (env *ExecutionEnv) wrapRuntimeErr(err error, cr *compiler.CompileResult, s
 	formattedMsg := compiler.FormatRuntimeError(err.Error(), cr)
 	if phase == "runtime" {
 		formattedMsg = enrichUnknownMethodError(env.VM, formattedMsg, cr)
+		formattedMsg = addTypeHint(formattedMsg)
 	}
 	formattedMsg = compiler.CleanStack(formattedMsg, cr)
 	return &ExecutionError{
@@ -1059,4 +1061,39 @@ func summarizeTarget(args []any) string {
 		}
 	}
 	return ""
+}
+
+var noMemberRegex = regexp.MustCompile(`Object has no member '([A-Za-z_$][\w$]*)'`)
+
+var (
+	stringOnlyMethods = map[string]bool{
+		"endsWith": true, "startsWith": true, "split": true, "trim": true, "trimStart": true, "trimEnd": true,
+		"toLowerCase": true, "toUpperCase": true, "replace": true, "replaceAll": true, "match": true, "matchAll": true,
+		"padStart": true, "padEnd": true, "charAt": true, "charCodeAt": true, "codePointAt": true, "substring": true,
+		"substr": true, "localeCompare": true, "normalize": true, "repeat": true, "search": true,
+	}
+	arrayOnlyMethods = map[string]bool{
+		"map": true, "filter": true, "forEach": true, "find": true, "findIndex": true, "some": true, "every": true,
+		"reduce": true, "flatMap": true, "join": true, "push": true, "sort": true, "reverse": true, "flat": true,
+	}
+)
+
+// addTypeHint explains the most common shape mistake: calling a string/array method on a plain object
+// (e.g. fs.list(p, { detail: true }) items treated as strings).
+func addTypeHint(msg string) string {
+	m := noMemberRegex.FindStringSubmatchIndex(msg)
+	if m == nil {
+		return msg
+	}
+	name := msg[m[2]:m[3]]
+	var hint string
+	switch {
+	case stringOnlyMethods[name]:
+		hint = " (the value is an object, not a string; check the API's return shape)"
+	case arrayOnlyMethods[name]:
+		hint = " (the value is an object, not an array; check the API's return shape)"
+	default:
+		return msg
+	}
+	return msg[:m[1]] + hint + msg[m[1]:]
 }

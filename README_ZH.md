@@ -126,7 +126,7 @@ const [hits, files, modText] = await Promise.all([
 const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
 const tree = await fs.tree(".", 2);
 ```
-- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename`（`mv`）· `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path, { detail? })` -> `string[]` (dirs end with `/`) · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename`（`mv`）· `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` -> `string[]`; `{ detail: true }` -> `[{ name, isDir, size }]` (dir names end with `/` in both) · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults?, filesOnly?, count? })`
 - `search.glob(pattern, { path?, maxResults? })`（支持 `{a,b}` 花括号展开与容错回退）
 - **跨目录 / 外部路径支持**：相对路径始终基于 `cwd` 解析；在策略允许下（默认开启），所有模块均支持直接传入工作区外的绝对路径或 `../` 跨仓路径（如 `D:/OtherRepo/...`）。
@@ -196,7 +196,7 @@ if (found.length > 0) {
   return { ref: schema.ref, preview: res.text.slice(0, 400) };
 }
 ```
-- 当脚本返回值超过 `9,600` UTF-8 字节（支持通过 `maxOutputBytes` 按需放开）时，`AgyPTC` 会优先自动切换为紧凑无缩进 JSON；若仍超限，则内联返回首尾摘要并自动将完整对象存入 `state.get("__last_result")`（及编号键 `__result_N`），下一回合可直接在内存中切片读取。
+- 输出超过 `9,600` UTF-8 字节时，完整值存入 `state.get("__last_result")`（及编号键 `__result_N`）。长文本（`print()` 或字符串结果）按行**分页**显示，并附页脚，如 `[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]`；对象则显示紧凑预览、结构摘要 `Shape` 以及产生大数据的 `Largest results`。不要把 `maxOutputBytes` 调到 10 KB 以上：Antigravity 会把更大的 MCP 输出落盘到 `output.txt`；整文件阅读请用原生 `read_file`。
 
 ### 错误
 宿主操作失败会抛出 JS `Error`：`name` 为语义化类型，`message` 为单行 `"op: detail"`；未捕获时会指向出错的用户代码行（`at code:N  <源码>`）：

@@ -437,15 +437,14 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 		} else {
 			autoSpilled = true
 			spillKey := store.SaveAutoSpill(stdout)
-			hint := ""
-			if spillKey != "" {
-				sections[0], hint = spillHeader(res, spillKey, stdout)
+			if spillKey == "" {
+				sections = append(sections, output.TruncateHeadTailBytes(stdout, avail, ""))
+			} else {
+				// Long text is shown page by page (line-aligned) instead of cut in the middle.
+				sections[0], _ = spillHeader(res, spillKey, stdout)
 				avail = maxOutBytes - len(sections[0]) - 24
-				if avail < 800 {
-					avail = 800
-				}
+				sections = append(sections, pagedPreview(stdout, avail))
 			}
-			sections = append(sections, output.TruncateHeadTailBytes(stdout, avail, hint))
 		}
 		joined := strings.Join(sections, "\n\n")
 		if len(joined) <= maxOutBytes {
@@ -484,7 +483,11 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 					avail = 800
 				}
 			}
-			sections = append(sections, output.TruncateHeadTailBytes(resSection, avail, hint))
+			if s, isText := res.Value.(string); isText && spillKey != "" {
+				sections = append(sections, "Result:\n"+pagedPreview(s, avail-8))
+			} else {
+				sections = append(sections, output.TruncateHeadTailBytes(resSection, avail, hint))
+			}
 		}
 	} else if len(logSection)+2+len(resSection) <= totalAvail {
 		// Both stdout logs and return value fit completely inline — never artificially clip logs at 2400B!
@@ -629,4 +632,18 @@ func largestResults(traces []sandbox.OpTrace, n, minBytes int) string {
 		parts[i] = opLabel(t) + " " + output.HumanBytes(t.Bytes)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// pagedPreview shows page 1 of a long text plus a footer pointing at state.page(n). The default budget uses
+// output.PageBytes; smaller or larger explicit budgets get a page size that fits (passed back in the footer).
+func pagedPreview(text string, avail int) string {
+	size := output.PageBytes
+	switch {
+	case avail < output.PageBytes+200:
+		size = max(500, (avail-200)/500*500)
+	case avail > 2*output.PageBytes:
+		size = (avail - 200) / 1000 * 1000
+	}
+	pages := output.Paginate(text, size)
+	return pages[0].Text + "\n" + output.PageFooter(pages[0], 1, len(pages), pages[len(pages)-1].LastLine, size)
 }

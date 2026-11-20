@@ -181,7 +181,8 @@ return a.length + b.length;`)
 	if isErr {
 		t.Fatalf("unexpected error: %s", out)
 	}
-	if !strings.Contains(out, "Warnings:\n  - search.rg: capped at 1 hits; narrow path/glob or pass { maxResults } (×2)") {
+	// With rg the total is known ("1 of 2"); the Go fallback omits it.
+	if !strings.Contains(out, "Warnings:\n  - search.rg: capped at 1") || !strings.Contains(out, "or use { count: true } for totals (×2)") {
 		t.Fatalf("expected deduplicated truncation warning, got:\n%s", out)
 	}
 }

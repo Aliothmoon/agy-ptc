@@ -66,7 +66,7 @@ func (b *FSSearchBinder) runListSearch(ctx context.Context, env *sandbox.Executi
 		})
 	}
 	if len(counts) > q.maxResults {
-		env.AddWarning(fmt.Sprintf("search.rg: capped at %d files; narrow path/glob or pass { maxResults }", q.maxResults))
+		env.AddWarning(fmt.Sprintf("search.rg: capped at %d of %d files; narrow path/glob or pass { maxResults }", q.maxResults, len(counts)))
 		counts = counts[:q.maxResults]
 	}
 	if q.mode == "files" {

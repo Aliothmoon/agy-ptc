@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aliothmoon/agy-ptc/internal/output"
 	"github.com/aliothmoon/agy-ptc/internal/sandbox"
 )
 
@@ -278,6 +279,38 @@ func (b *StateBinder) Bind(env *sandbox.ExecutionEnv) error {
 		"clear": func(_ context.Context, _ []any) (any, error) {
 			b.Store.Clear()
 			return map[string]any{"ok": true}, nil
+		},
+		// state.page(n, size?) returns page n (negative = from the end) of the last truncated output, with a
+		// footer saying where it is, so long text can be read page by page without estimating slice() bounds.
+		"page": func(_ context.Context, args []any) (any, error) {
+			n, size := 1, output.PageBytes
+			if len(args) > 0 {
+				if v, ok := toInt(args[0]); ok {
+					n = v
+				}
+			}
+			if len(args) > 1 {
+				if v, ok := toInt(args[1]); ok && v >= 500 {
+					size = v
+				}
+			}
+			val := b.Store.Get("__last_result")
+			if val == nil {
+				return nil, sandbox.NewHostError(sandbox.KindNotFound, nil, "nothing to page yet (pages the last truncated output)")
+			}
+			text, ok := val.(string)
+			if !ok {
+				text = output.MarshalPretty(val)
+			}
+			pages := output.Paginate(text, size)
+			if n < 0 {
+				n = len(pages) + n + 1
+			}
+			if n < 1 || n > len(pages) {
+				return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "page out of range (1..%d)", len(pages))
+			}
+			total := pages[len(pages)-1].LastLine
+			return pages[n-1].Text + "\n" + output.PageFooter(pages[n-1], n, len(pages), total, size), nil
 		},
 	}
 	return env.SetNamespace("state", nil, syncMethods)
