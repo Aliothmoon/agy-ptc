@@ -2,7 +2,7 @@ module github.com/aliothmoon/agy-ptc
 
 go 1.27.1
 
-require github.com/aliothmoon/mcplex v0.4.0
+require github.com/aliothmoon/mcplex v0.4.1
 
 require (
 	github.com/dlclark/regexp2/v2 v2.11.0 // indirect
