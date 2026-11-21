@@ -386,8 +386,13 @@ func isPluginDirectory(ws string) bool {
 	if strings.Contains(norm, "/.gemini/config/plugins/agy-ptc") || strings.Contains(norm, "/.agents/plugins/agy-ptc") {
 		return true
 	}
-	if _, err := os.Stat(filepath.Join(abs, "plugin.json")); err == nil {
-		return true
+	if raw, err := os.ReadFile(filepath.Join(abs, "plugin.json")); err == nil {
+		var meta struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &meta) == nil && strings.EqualFold(strings.TrimSpace(meta.Name), "agy-ptc") {
+			return true
+		}
 	}
 	return false
 }

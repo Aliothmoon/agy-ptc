@@ -51,6 +51,20 @@ func TestSessionStartHookSkipsPluginDirAndDryRun(t *testing.T) {
 		t.Fatalf("plugin directory overwrote active-workspace.json: got %s, want %s", string(afterPlugin), string(rawHint))
 	}
 
+	// 2b. Another project that happens to have its own plugin.json (name != "agy-ptc") MUST still be recorded!
+	otherPluginProj := t.TempDir()
+	if err := os.WriteFile(filepath.Join(otherPluginProj, "plugin.json"), []byte(`{"name":"my-custom-plugin"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	inOtherPlugin, _ := json.Marshal(map[string]string{"cwd": otherPluginProj})
+	RunSessionStartHook(bytes.NewReader(inOtherPlugin), &out)
+	afterOtherPlugin, _ := os.ReadFile(hintFile)
+	if !strings.Contains(string(afterOtherPlugin), filepath.Base(otherPluginProj)) {
+		t.Fatalf("non-agy-ptc plugin project should update active-workspace.json, got: %s", string(afterOtherPlugin))
+	}
+	rawHint = afterOtherPlugin
+
 	// 3. Dry-run hook (used by doctor/install) MUST NOT overwrite active-workspace.json
 	otherWs := t.TempDir()
 	t.Setenv("AGY_PTC_DRY_RUN_HOOK", "1")
