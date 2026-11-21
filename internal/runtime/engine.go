@@ -41,10 +41,12 @@ type Engine struct {
 	clientWorkspace string
 	auditor         *audit.Logger
 	mu              sync.Mutex
+	statusMu        sync.Mutex
 	stores          map[string]*capabilities.StateStore
 	bridges         map[string]*capabilities.MCPBridge
 	totalRuns       atomic.Int64
 	totalHostOps    atomic.Int64
+	statusSeq       atomic.Int64
 }
 
 // NewEngine creates a PTC runtime engine.
@@ -372,7 +374,7 @@ func (e *Engine) workspaceResources(cwd string, pol *policy.Engine) (*capabiliti
 		br = capabilities.NewMCPBridge(pol, cwd)
 		e.bridges[key] = br
 	} else {
-		br.Policy = pol
+		br.SetPolicy(pol)
 	}
 	return st, br
 }
@@ -386,10 +388,14 @@ func (e *Engine) writeLiveStatus(st LiveStatus) {
 	if err != nil {
 		return
 	}
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
 	p := filepath.Join(e.dataDir, "live-status.json")
-	tmp := fmt.Sprintf("%s.tmp.%d", p, os.Getpid())
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", p, os.Getpid(), e.statusSeq.Add(1))
 	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, p)
+		if err := os.Rename(tmp, p); err != nil {
+			_ = os.Remove(tmp)
+		}
 	}
 }
 
@@ -443,7 +449,7 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 				// Long text is shown page by page (line-aligned) instead of cut in the middle.
 				sections[0], _ = spillHeader(res, spillKey, stdout)
 				avail = maxOutBytes - len(sections[0]) - 24
-				sections = append(sections, pagedPreview(stdout, avail))
+				sections = append(sections, pagedPreview(stdout, avail, spillKey))
 			}
 		}
 		joined := strings.Join(sections, "\n\n")
@@ -484,7 +490,7 @@ func formatSuccessBody(res *sandbox.ExecResult, store *capabilities.StateStore, 
 				}
 			}
 			if s, isText := res.Value.(string); isText && spillKey != "" {
-				sections = append(sections, "Result:\n"+pagedPreview(s, avail-8))
+				sections = append(sections, "Result:\n"+pagedPreview(s, avail-8, spillKey))
 			} else {
 				sections = append(sections, output.TruncateHeadTailBytes(resSection, avail, hint))
 			}
@@ -634,9 +640,9 @@ func largestResults(traces []sandbox.OpTrace, n, minBytes int) string {
 	return strings.Join(parts, ", ")
 }
 
-// pagedPreview shows page 1 of a long text plus a footer pointing at state.page(n). The default budget uses
+// pagedPreview shows page 1 of a long text plus a footer pointing at state.page(key, n). The default budget uses
 // output.PageBytes; smaller or larger explicit budgets get a page size that fits (passed back in the footer).
-func pagedPreview(text string, avail int) string {
+func pagedPreview(text string, avail int, key string) string {
 	size := output.PageBytes
 	switch {
 	case avail < output.PageBytes+200:
@@ -645,5 +651,5 @@ func pagedPreview(text string, avail int) string {
 		size = (avail - 200) / 1000 * 1000
 	}
 	pages := output.Paginate(text, size)
-	return pages[0].Text + "\n" + output.PageFooter(pages[0], 1, len(pages), pages[len(pages)-1].LastLine, size)
+	return pages[0].Text + "\n" + output.PageFooter(pages[0], 1, len(pages), pages[len(pages)-1].LastLine, size, key)
 }

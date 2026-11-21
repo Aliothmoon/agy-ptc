@@ -196,7 +196,7 @@ if (found.length > 0) {
   return { ref: schema.ref, preview: res.text.slice(0, 400) };
 }
 ```
-- If output exceeds `9,600` UTF-8 bytes, the full value is saved in `state.get("__last_result")` (and `state.get("__result_N")`). Long text (`print()` or a string result) is shown **page by page** at line boundaries with a footer like `[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]`; objects show a compact preview plus their `Shape` and the `Largest results` that produced them. Don't raise `maxOutputBytes` past ~10 KB: Antigravity spills larger MCP output to `output.txt`; read whole files with native `read_file` instead.
+- If output exceeds `9,600` UTF-8 bytes, the full value is saved in process-local memory under `state.get("__result_N")` (with `"__last_result"` aliasing the latest spill). Long text (`print()` or a string result) is shown **page by page** at line boundaries with a key-bound footer like `[page 1/4 · lines 1-212 of 890 · next: print(state.page('__result_1', 2)) · last: state.page('__result_1', -1)]` so concurrent calls never mix; objects show a compact preview plus their `Shape` and the `Largest results` that produced them. Don't raise `maxOutputBytes` past ~10 KB: Antigravity spills larger MCP output to `output.txt`; read whole files with native `read_file` instead.
 
 ### Errors
 Host failures throw a JS `Error` with a semantic `name` and a one-line `message` (`"op: detail"`); uncaught ones point at your line (`at code:N  <source>`):

@@ -51,13 +51,19 @@ func TestPaginateIsLineAlignedContiguousAndBounded(t *testing.T) {
 
 func TestPageFooter(t *testing.T) {
 	p := Page{FirstLine: 1, LastLine: 212}
-	if got := PageFooter(p, 1, 4, 890, PageBytes); got != "[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]" {
-		t.Fatalf("footer = %s", got)
+	if got := PageFooter(p, 1, 4, 890, PageBytes, ""); got != "[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]" {
+		t.Fatalf("keyless footer = %s", got)
 	}
-	if got := PageFooter(Page{FirstLine: 700, LastLine: 890}, 4, 4, 890, 2500); got != "[page 4/4 · lines 700-890 of 890]" {
+	if got := PageFooter(p, 1, 4, 890, PageBytes, "__result_3"); got != "[page 1/4 · lines 1-212 of 890 · next: print(state.page('__result_3', 2)) · last: state.page('__result_3', -1)]" {
+		t.Fatalf("keyed footer = %s", got)
+	}
+	if got := PageFooter(Page{FirstLine: 700, LastLine: 890}, 4, 4, 890, 2500, "__result_3"); got != "[page 4/4 · lines 700-890 of 890]" {
 		t.Fatalf("last footer = %s", got)
 	}
-	if got := PageFooter(p, 1, 3, 890, 2500); !strings.Contains(got, "print(state.page(2, 2500))") {
-		t.Fatalf("custom size must be passed back: %s", got)
+	if got := PageFooter(p, 1, 3, 890, 2500, "__result_3"); !strings.Contains(got, "print(state.page('__result_3', 2, 2500))") || !strings.Contains(got, "state.page('__result_3', -1, 2500)") {
+		t.Fatalf("custom size must be passed back with key: %s", got)
+	}
+	if got := PageFooter(p, 1, 2, 890, PageBytes, "foo'bar"); !strings.Contains(got, `print(state.page("foo'bar", 2))`) {
+		t.Fatalf("special key must be safely quoted: %s", got)
 	}
 }

@@ -56,6 +56,7 @@ type MCPBridge struct {
 	SelfName     string // e.g. "agy-ptc" or "agy-ptc_vm", excluded to prevent recursion
 
 	mu         sync.Mutex
+	policyPtr  atomic.Pointer[policy.Engine]
 	stdioPool  map[string]*stdioClient
 	httpClient *http.Client
 	reqSeq     atomic.Int64
@@ -63,13 +64,27 @@ type MCPBridge struct {
 
 // NewMCPBridge constructs an external MCP multiplexer.
 func NewMCPBridge(pol *policy.Engine, workspaceDir string) *MCPBridge {
-	return &MCPBridge{
+	b := &MCPBridge{
 		Policy:       pol,
 		WorkspaceDir: workspaceDir,
 		SelfName:     "agy-ptc",
 		stdioPool:    map[string]*stdioClient{},
 		httpClient:   &http.Client{Timeout: 60 * time.Second},
 	}
+	b.policyPtr.Store(pol)
+	return b
+}
+
+// SetPolicy atomically updates the policy engine used by concurrent callers.
+func (m *MCPBridge) SetPolicy(pol *policy.Engine) {
+	m.policyPtr.Store(pol)
+}
+
+func (m *MCPBridge) currentPolicy() *policy.Engine {
+	if p := m.policyPtr.Load(); p != nil {
+		return p
+	}
+	return m.Policy
 }
 
 // Close shuts down any pooled child stdio MCP processes.
@@ -206,8 +221,10 @@ func (m *MCPBridge) CallExternalTool(ctx context.Context, cwd, rawRef string, ca
 
 	// Resolve exact tool name against cached disk schemas if JS used underscore sanitization (e.g. resolve_library_id -> resolve-library-id).
 	exactTool := m.resolveCachedToolName(serverName, toolHint)
-	if err := m.Policy.CheckMCP(serverName, exactTool); err != nil {
-		return nil, err
+	if pol := m.currentPolicy(); pol != nil {
+		if err := pol.CheckMCP(serverName, exactTool); err != nil {
+			return nil, err
+		}
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
@@ -395,8 +412,10 @@ func (m *MCPBridge) loadConfiguredServers(cwd string) map[string]externalServerC
 	}
 	// Workspace-level config lives inside the (possibly cloned, untrusted) repository and can declare arbitrary
 	// `command`s, so it is only honored after an explicit opt-in (see policy.Engine.TrustWorkspaceMCP).
-	if ws := m.workspaceDirFor(cwd); ws != "" && m.Policy != nil && m.Policy.TrustWorkspaceMCP() {
-		paths = append(paths, filepath.Join(ws, ".agents", "mcp_config.json"))
+	if ws := m.workspaceDirFor(cwd); ws != "" {
+		if pol := m.currentPolicy(); pol != nil && pol.TrustWorkspaceMCP() {
+			paths = append(paths, filepath.Join(ws, ".agents", "mcp_config.json"))
+		}
 	}
 	for _, p := range paths {
 		raw, err := os.ReadFile(p)
@@ -426,7 +445,7 @@ func (m *MCPBridge) workspaceDirFor(cwd string) string {
 
 // workspaceMCPConfigIgnored reports whether a workspace MCP config exists but was skipped for lack of opt-in.
 func (m *MCPBridge) workspaceMCPConfigIgnored(cwd string) bool {
-	if m.Policy != nil && m.Policy.TrustWorkspaceMCP() {
+	if pol := m.currentPolicy(); pol != nil && pol.TrustWorkspaceMCP() {
 		return false
 	}
 	ws := m.workspaceDirFor(cwd)
@@ -743,6 +762,7 @@ func builtinDescriptors() []ToolDescriptor {
 		{Ref: "sh.checks", Provider: "sh", Name: "checks", Description: "Run up to 12 build/typecheck/lint/test commands concurrently with focused error extraction"},
 		{Ref: "state.get", Provider: "state", Name: "get", Description: "Read a value persisted across PTC turns in this workspace session"},
 		{Ref: "state.set", Provider: "state", Name: "set", Description: "Persist a JSON value across PTC turns in this workspace session"},
+		{Ref: "state.page", Provider: "state", Name: "page", Description: "Read a line-aligned page of a spilled or stored value (state.page(key, n, size?) or state.page(n))"},
 	}
 }
 

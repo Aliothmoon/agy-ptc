@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -67,20 +68,32 @@ func Paginate(text string, size int) []Page {
 }
 
 // PageFooter tells the model where it is and how to continue, e.g.
-// "[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]".
-func PageFooter(p Page, index, total, totalLines, size int) string {
+// "[page 1/4 · lines 1-212 of 890 · next: print(state.page('__result_1', 2)) · last: state.page('__result_1', -1)]".
+// When key is empty, the footer falls back to the keyless state.page(n) form.
+func PageFooter(p Page, index, total, totalLines, size int, key string) string {
+	keyArg := ""
+	if key != "" {
+		keyArg = quoteJSKey(key) + ", "
+	}
 	sizeArg := ""
 	if size != PageBytes {
 		sizeArg = fmt.Sprintf(", %d", size)
 	}
 	f := fmt.Sprintf("[page %d/%d · lines %d-%d of %d", index, total, p.FirstLine, p.LastLine, totalLines)
 	if index < total {
-		f += fmt.Sprintf(" · next: print(state.page(%d%s))", index+1, sizeArg)
+		f += fmt.Sprintf(" · next: print(state.page(%s%d%s))", keyArg, index+1, sizeArg)
 		if index+1 < total {
-			f += fmt.Sprintf(" · last: state.page(-1%s)", sizeArg)
+			f += fmt.Sprintf(" · last: state.page(%s-1%s)", keyArg, sizeArg)
 		}
 	}
 	return f + "]"
+}
+
+func quoteJSKey(k string) string {
+	if !strings.ContainsAny(k, "'\\\r\n") {
+		return "'" + k + "'"
+	}
+	return strconv.Quote(k)
 }
 
 // MarshalPretty renders a value as indented JSON (no HTML escaping) so it pages line by line.

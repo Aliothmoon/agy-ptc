@@ -196,7 +196,7 @@ if (found.length > 0) {
   return { ref: schema.ref, preview: res.text.slice(0, 400) };
 }
 ```
-- 输出超过 `9,600` UTF-8 字节时，完整值存入 `state.get("__last_result")`（及编号键 `__result_N`）。长文本（`print()` 或字符串结果）按行**分页**显示，并附页脚，如 `[page 1/4 · lines 1-212 of 890 · next: print(state.page(2)) · last: state.page(-1)]`；对象则显示紧凑预览、结构摘要 `Shape` 以及产生大数据的 `Largest results`。不要把 `maxOutputBytes` 调到 10 KB 以上：Antigravity 会把更大的 MCP 输出落盘到 `output.txt`；整文件阅读请用原生 `read_file`。
+- 输出超过 `9,600` UTF-8 字节时，完整值存入进程内内存的编号键 `state.get("__result_N")`（同时 `"__last_result"` 作为最新结果的别名）。长文本（`print()` 或字符串结果）按行**分页**显示，并附绑定键名的页脚，如 `[page 1/4 · lines 1-212 of 890 · next: print(state.page('__result_1', 2)) · last: state.page('__result_1', -1)]`（并发调用不会串数据）；对象则显示紧凑预览、结构摘要 `Shape` 以及产生大数据的 `Largest results`。不要把 `maxOutputBytes` 调到 10 KB 以上：Antigravity 会把更大的 MCP 输出落盘到 `output.txt`；整文件阅读请用原生 `read_file`。
 
 ### 错误
 宿主操作失败会抛出 JS `Error`：`name` 为语义化类型，`message` 为单行 `"op: detail"`；未捕获时会指向出错的用户代码行（`at code:N  <源码>`）：

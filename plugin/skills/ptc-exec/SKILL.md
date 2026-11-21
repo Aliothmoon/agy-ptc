@@ -71,7 +71,7 @@ if (hits.length > 0) {
 - **`print(...)` / `console.log(...)` without `return`**: Streams raw unescaped stdout directly under the full inline budget (`<= 9,600 B`, no `Logs:`/`Result: null` wrapper, no JSON `\n`/`\"`/`\\` escaping). Best for multiline code, diffs, tables, and log reports.
 - **`return` a `string`**: Outputs raw unescaped text under `Result:`.
 - **`return { ... }`**: Outputs compact JSON; if you both `print()` and `return`, the inline budget is shared dynamically between stdout and `Result:`.
-- **Auto-Spill to `state`**: If either `print()` stdout or a `return` value exceeds `9,600` UTF-8 bytes, `AgyPTC` saves the intact payload in `state.get("__last_result")` (and `state.get("__result_N")`, named on line 1) instead of spilling to `output.txt`. Long text is shown page by page; continue with `print(state.page(2))` (`state.page(-1)` = last page). Objects come with their `Shape`; slice them in the next turn:
+- **Auto-Spill to `state`**: If either `print()` stdout or a `return` value exceeds `9,600` UTF-8 bytes, `AgyPTC` saves the intact payload in memory under `state.get("__result_N")` (named on line 1, with `"__last_result"` aliasing the latest spill) instead of spilling to `output.txt`. Long text is shown page by page; continue with `print(state.page('__result_N', 2))` (`-1` = last page; key-bound so concurrent calls never mix). Objects come with their `Shape`; slice them in the next turn:
 
 ```ts
 const prev = state.get("__last_result") as Array<{ file: string; line: number }>;
