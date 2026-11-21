@@ -1,7 +1,7 @@
 github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/aliothmoon/mcplex v0.3.0 h1:2GvsPDF3aSYOrOHWn2FKbckQzehqVlgOzfP0zujz5d4=
-github.com/aliothmoon/mcplex v0.3.0/go.mod h1:47QrB5sbE848W/MK+4qUjVMUZ0/oRcmiG8e1QJwT1X0=
+github.com/aliothmoon/mcplex v0.3.1-0.20261121180142-ded3b94e742c h1:QwK7Lud9f5ygEnQvqJpD22fwxmw34SyXl8dgQE5t368=
+github.com/aliothmoon/mcplex v0.3.1-0.20261121180142-ded3b94e742c/go.mod h1:47QrB5sbE848W/MK+4qUjVMUZ0/oRcmiG8e1QJwT1X0=
 github.com/dlclark/regexp2/v2 v2.11.0 h1:z5uRPHav+eTVpoffDSuUP2KPS4f1ONZaPDK73S8HA0w=
 github.com/dlclark/regexp2/v2 v2.11.0/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 github.com/dop251/goja v0.0.0-20261118204651-8dfece3d1e1d h1:MG+QmJk8N7lfsvBndLoPAIYhjYtJCEHMID11PskskTY=
