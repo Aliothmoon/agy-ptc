@@ -13,6 +13,10 @@
 *.out
 coverage.*
 
+# Local dual-repo workspace file (keep go.mod free of local replace paths)
+go.work
+go.work.sum
+
 # Scratch & editor directories
 /.tmp/
 .DS_Store

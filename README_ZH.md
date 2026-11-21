@@ -10,6 +10,8 @@
 
 `AgyPTC` 受 Cloudflare Code Mode、Anthropic Programmatic Tool Calling 以及 [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 启发，为 **Antigravity CLI (`agy`)** 提供原生的 **Code Mode（编程式工具调用）** 能力。
 
+> **基于共享核心 [`MCPlex`](https://github.com/Aliothmoon/mcplex) 构建：** 客户端无关的 Code Mode 沙箱、TypeScript 编译器、AST/事务编辑能力与 MCP 代理核心统一维护在 [`github.com/aliothmoon/mcplex`](https://github.com/Aliothmoon/mcplex)（`pkg/...`）。若需在 Claude Desktop、Cursor、Windsurf、Cline 等任意通用 MCP 客户端中使用，可直接使用 `MCPlex`；`AgyPTC` 专注提供 Antigravity CLI 深度原生集成（钩子、状态栏、规则、技能与插件生命周期管理）。
+
 传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test` -> 失败手动回滚），不仅推理延迟高，还会把大量中间文件文本塞进上下文窗口，甚至触发 Antigravity `>10 KB` 的 `output.txt` 磁盘落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_vm_exec` 提交**一段极短的 TypeScript 脚本**，搜索、AST 符号大纲、循环过滤、跨文件原子事务修改（失败自动回滚）与外部 MCP 调用即可在 **1 个回合**内于本地 Go 沙箱内存中完成，仅将 `<= 9.6 KB` 的精简结构化摘要（亦可通过 `maxOutputBytes` 按需放开）返回给模型。
 
 ---
@@ -266,21 +268,28 @@ agy-ptc uninstall                      # 卸载全局或项目级 agy-ptc 插件
 
 ## 目录结构
 
+`AgyPTC` 是面向 Antigravity CLI 的轻量插件外壳，核心引擎通过标准 Go Module 依赖自 [`github.com/aliothmoon/mcplex/pkg/...`](https://github.com/Aliothmoon/mcplex)：
+
 ```text
 AgyPTC/
 ├── cmd/agy-ptc/             # CLI 入口（mcp, hook, statusline, run, logs, errors, stats, bench, install, doctor）
 ├── internal/
-│   ├── compiler/            # esbuild TS -> ES2020 编译、VLQ 源码行号映射与 payload 静态预检
-│   ├── sandbox/             # 隔离 goja VM、异步 Goroutine -> 微任务事件循环、超时看门狗与操作预算
-│   ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, 外部 MCP 桥接与跨平台进程树管控
-│   ├── policy/              # 真实路径解析、敏感文件防护与 settings.json 权限规则引擎
-│   ├── output/              # <= 9,600 B UTF-8 注水法字节预算器与终端 ANSI/噪声清洗
-│   ├── runtime/             # 核心引擎编排、工作区 cwd 安全解析、超限自动转存 state 与实时状态输出
-│   ├── mcpserver/           # Stdio JSON-RPC 2.0 MCP 服务端（同时支持 NDJSON 与 Content-Length 帧）
 │   ├── snapshot/            # <= 1.5 KB SessionStart 工作区快照钩子与 TUI 状态栏渲染
-│   ├── audit/               # JSONL 执行/错误审计日志与错误热点分类器
-│   └── bench/               # Antigravity 本地 transcript.jsonl 效率统计工具
+│   ├── bench/               # Antigravity 本地 transcript.jsonl 效率统计工具
+│   └── version/             # 插件独立版本号（与 plugin/plugin.json 强一致校验）
 └── plugin/                  # Antigravity CLI 插件包（plugin.json, mcp_config.json, hooks.json, rules, agents, skills）
+
+github.com/aliothmoon/mcplex（共享 Go 核心模块）
+└── pkg/
+    ├── compiler/            # esbuild TS -> ES2020 编译、VLQ 源码行号映射与词法级 payload 预检
+    ├── sandbox/             # 隔离 goja VM、异步 Goroutine -> 微任务事件循环、超时看门狗与操作预算
+    ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, 外部 MCP 桥接与跨平台进程树管控
+    ├── policy/              # 真实路径解析、敏感文件防护与 settings.json 权限规则引擎
+    ├── output/              # <= 9,600 B UTF-8 注水法字节预算器与终端 ANSI/噪声清洗
+    ├── runtime/             # 核心引擎编排、工作区 cwd 安全解析、超限自动转存 state 与实时状态输出
+    ├── mcpserver/           # Stdio 与 Streamable HTTP JSON-RPC 2.0 MCP 服务端
+    ├── audit/               # JSONL 执行/错误审计日志与错误热点分类器
+    └── skill/               # 内嵌的客户端无关 Code Mode 指南
 ```
 
 ---

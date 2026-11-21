@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aliothmoon/agy-ptc/internal/output"
-	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
+	"github.com/aliothmoon/mcplex/pkg/output"
+	ptcruntime "github.com/aliothmoon/mcplex/pkg/runtime"
 )
 
 var noisyDirs = map[string]bool{

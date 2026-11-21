@@ -10,6 +10,8 @@
 
 `AgyPTC` brings **Code Mode / Programmatic Tool Calling (PTC)**—inspired by Cloudflare Code Mode, Anthropic Programmatic Tool Calling, and [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric)—natively to **Antigravity CLI (`agy`)**.
 
+> **Powered by [`MCPlex`](https://github.com/Aliothmoon/mcplex):** The client-agnostic Code Mode sandbox, TypeScript compiler, AST/edit/transaction capabilities, and MCP multiplexer live in [`github.com/aliothmoon/mcplex`](https://github.com/Aliothmoon/mcplex) (`pkg/...`). Use `MCPlex` directly for Claude Desktop, Cursor, Windsurf, Cline, or any generic MCP client; use `AgyPTC` for deep Antigravity CLI integration (hooks, statusline, rules, skills, and `agy plugin` lifecycle).
+
 Instead of burning 8–15 sequential LLM turns on `grep` -> `read_file` -> `read_file` -> `edit_file` -> `run_command` (and bloating the conversation window with raw intermediate outputs), the agent writes **one short TypeScript program** invoked via `mcp_agy-ptc_vm_exec`. Intermediate files, AST symbols, loops, and conditional checks stay inside sandbox memory, returning only a compact `<= 9.6 KB` structured summary (or custom `maxOutputBytes`) to the model.
 
 ---
@@ -266,21 +268,28 @@ agy-ptc uninstall                      # Cleanly remove global/project plugin in
 
 ## Project Layout
 
+`AgyPTC` is a thin Antigravity CLI plugin shell importing the shared core from [`github.com/aliothmoon/mcplex/pkg/...`](https://github.com/Aliothmoon/mcplex):
+
 ```text
 AgyPTC/
 ├── cmd/agy-ptc/             # CLI entrypoint (mcp, hook, statusline, run, logs, errors, stats, bench, install, doctor)
 ├── internal/
-│   ├── compiler/            # esbuild TS -> ES2020 transpiler, VLQ sourcemapper & payload preflight check
-│   ├── sandbox/             # Isolated goja VM, async goroutine -> microtask loop, watchdog & op budget
-│   ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, external mcp bridge & process-tree control
-│   ├── policy/              # Symlink resolution, credential guards & settings.json rule evaluator
-│   ├── output/              # <= 9,600 B UTF-8 water-filling budgeter & terminal noise/ANSI stripper
-│   ├── runtime/             # Engine wiring, workspace cwd resolution, auto-spill & live-status writer
-│   ├── mcpserver/           # Stdio JSON-RPC 2.0 MCP server (NDJSON + Content-Length framing)
 │   ├── snapshot/            # <= 1.5 KB SessionStart workspace snapshot & TUI statusline
-│   ├── audit/               # JSONL execution/error logger & hotspot classifier
-│   └── bench/               # Antigravity transcript.jsonl efficiency analyzer
+│   ├── bench/               # Antigravity transcript.jsonl efficiency analyzer
+│   └── version/             # Plugin release version (synced with plugin/plugin.json)
 └── plugin/                  # Antigravity CLI plugin bundle (plugin.json, mcp_config.json, hooks.json, rules, agents, skills)
+
+github.com/aliothmoon/mcplex (Go module dependency)
+└── pkg/
+    ├── compiler/            # esbuild TS -> ES2020 transpiler, VLQ sourcemapper & lexical payload check
+    ├── sandbox/             # Isolated goja VM, async goroutine -> microtask loop, watchdog & op budget
+    ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, external mcp bridge & process-tree control
+    ├── policy/              # Symlink resolution, credential guards & settings.json rule evaluator
+    ├── output/              # <= 9,600 B UTF-8 water-filling budgeter & terminal noise/ANSI stripper
+    ├── runtime/             # Engine wiring, workspace cwd resolution, auto-spill & live-status writer
+    ├── mcpserver/           # Stdio & Streamable HTTP JSON-RPC 2.0 MCP server
+    ├── audit/               # JSONL execution/error logger & hotspot classifier
+    └── skill/               # Embedded client-agnostic Code Mode guide
 ```
 
 ---

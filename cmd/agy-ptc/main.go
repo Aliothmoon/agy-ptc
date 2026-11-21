@@ -19,11 +19,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aliothmoon/agy-ptc/internal/audit"
 	"github.com/aliothmoon/agy-ptc/internal/bench"
-	"github.com/aliothmoon/agy-ptc/internal/mcpserver"
-	ptcruntime "github.com/aliothmoon/agy-ptc/internal/runtime"
 	"github.com/aliothmoon/agy-ptc/internal/snapshot"
+	"github.com/aliothmoon/agy-ptc/internal/version"
+	"github.com/aliothmoon/mcplex/pkg/audit"
+	"github.com/aliothmoon/mcplex/pkg/mcpserver"
+	ptcruntime "github.com/aliothmoon/mcplex/pkg/runtime"
 )
 
 const pluginName = "agy-ptc"
@@ -71,7 +72,7 @@ func main() {
 	case "-h", "--help", "help":
 		printUsage()
 	case "-v", "--version", "version":
-		fmt.Printf("agy-ptc v%s (%s/%s)\n", mcpserver.ServerVersion, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("agy-ptc v%s (%s/%s)\n", version.Version, runtime.GOOS, runtime.GOARCH)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand '%s'\n\n", sub)
 		printUsage()
@@ -112,7 +113,10 @@ func runMCP(args []string) {
 	eng := ptcruntime.NewEngine(*dataDir, *cwd)
 	defer eng.Close()
 
-	srv := mcpserver.NewServer(eng)
+	srv := mcpserver.NewServerWithOptions(eng, mcpserver.ServerOptions{
+		ServerName:    pluginName,
+		ServerVersion: version.Version,
+	})
 	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "mcp server error: %v\n", err)
 		os.Exit(1)
@@ -445,7 +449,7 @@ func runDoctor(args []string) error {
 	}
 
 	fmt.Println("agy-ptc health check:")
-	fmt.Printf("  - Binary      : %s (v%s, %s/%s)\n", exePath, mcpserver.ServerVersion, runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("  - Binary      : %s (v%s, %s/%s)\n", exePath, version.Version, runtime.GOOS, runtime.GOARCH)
 	fmt.Printf("  - Plugin dir  : %s\n", target)
 	if rgPath, err := exec.LookPath("rg"); err == nil {
 		fmt.Printf("  - ripgrep (rg): available (%s)\n", rgPath)
