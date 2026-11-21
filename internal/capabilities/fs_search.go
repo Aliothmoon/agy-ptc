@@ -441,7 +441,7 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 		maxResults:    defaultRgMaxResults,
 	}
 	if len(args) == 0 || args[0] == nil {
-		return q, errors.New("search.rg requires a pattern string or options object")
+		return q, sandbox.NewHostError(sandbox.KindBadArgs, nil, "requires a pattern string or options object")
 	}
 	var opts map[string]any
 	if s, ok := args[0].(string); ok {
@@ -458,7 +458,7 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 		q.pattern = firstString(m, "pattern", "query", "regex", "text", "q")
 	}
 	if q.pattern == "" {
-		return q, errors.New("search.rg: 'pattern' cannot be empty")
+		return q, sandbox.NewHostError(sandbox.KindBadArgs, nil, "'pattern' cannot be empty")
 	}
 	if opts != nil {
 		if p := firstString(opts, "path", "dir", "directory"); p != "" {
@@ -498,6 +498,25 @@ func parseSearchQuery(args []any) (searchQuery, error) {
 	return q, nil
 }
 
+func invalidRegexError(pattern, detail string) error {
+	detail = strings.TrimSpace(detail)
+	if strings.Contains(detail, "\n") {
+		var kept []string
+		for _, l := range strings.Split(detail, "\n") {
+			if t := strings.TrimSpace(l); t != "" {
+				kept = append(kept, t)
+				if len(kept) >= 3 {
+					break
+				}
+			}
+		}
+		detail = strings.Join(kept, " | ")
+	}
+	return sandbox.NewHostError(sandbox.KindBadArgs, nil,
+		"invalid regex %q: %s (in JS strings/templates escape backslashes as \\\\ or pass { literal: true })",
+		pattern, detail)
+}
+
 // runTextOrRegexSearch returns hits and the total number of matches (-1 when unknown, e.g. Go fallback).
 func (b *FSSearchBinder) runTextOrRegexSearch(ctx context.Context, workspaceCwd, searchRoot string, q searchQuery) ([]SearchHit, int, error) {
 	if rgBin := b.resolveRg(); rgBin != "" {
@@ -507,6 +526,10 @@ func (b *FSSearchBinder) runTextOrRegexSearch(ctx context.Context, workspaceCwd,
 		}
 		if ctx.Err() != nil {
 			return nil, -1, ctx.Err()
+		}
+		var he *sandbox.HostError
+		if errors.As(err, &he) {
+			return nil, -1, err
 		}
 	}
 	hits, err := runGoFallbackSearch(ctx, workspaceCwd, searchRoot, q)
@@ -549,7 +572,11 @@ func runRgJSON(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q se
 				return []SearchHit{}, 0, nil
 			}
 			if exitErr.ExitCode() == 2 {
-				return nil, -1, fmt.Errorf("invalid search pattern: %s", strings.TrimSpace(stderr.String()))
+				msg := strings.TrimSpace(stderr.String())
+				if strings.Contains(strings.ToLower(msg), "regex") {
+					return nil, -1, invalidRegexError(q.pattern, msg)
+				}
+				return nil, -1, fmt.Errorf("invalid search pattern: %s", msg)
 			}
 		}
 		if rgCtx.Err() != nil {
@@ -666,7 +693,7 @@ func runGoFallbackSearch(ctx context.Context, workspaceCwd, searchRoot string, q
 	}
 	re, err = regexp.Compile(pat)
 	if err != nil {
-		return nil, fmt.Errorf("invalid regex '%s': %w", q.pattern, err)
+		return nil, invalidRegexError(q.pattern, err.Error())
 	}
 
 	var files []string

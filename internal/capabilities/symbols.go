@@ -183,3 +183,84 @@ func resolveSymbol(syms []SymbolInfo, query, rel string) (SymbolInfo, error) {
 	}
 	return SymbolInfo{}, sandbox.NewHostError(sandbox.KindAmbiguous, nil, "%s: symbol %s matches %d (%s); qualify it", rel, query, len(hits), joinLimited(names, 6))
 }
+
+func hashCommentLang(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".py", ".sh", ".bash", ".zsh", ".rb", ".yml", ".yaml", ".toml":
+		return true
+	}
+	return false
+}
+
+// leadingDocStartLine extends a symbol's 1-based startLine upward to include any directly attached
+// doc comment block (//, ///, /* ... */, /** ... */, # in Python/shell) and attributes/decorators
+// (#[...], @...) without crossing a blank line, another symbol's body, or an enclosing header.
+func leadingDocStartLine(lines []string, syms []SymbolInfo, target SymbolInfo, path string) int {
+	if target.StartLine <= 1 || len(lines) == 0 {
+		return target.StartLine
+	}
+	minLine := 1
+	for _, other := range syms {
+		if other.StartLine == target.StartLine && other.EndLine == target.EndLine && other.Name == target.Name {
+			continue
+		}
+		// Never cross a preceding sibling symbol's end line.
+		if other.EndLine > 0 && other.EndLine < target.StartLine && other.EndLine+1 > minLine {
+			minLine = other.EndLine + 1
+		}
+		// Never cross an enclosing container's header line.
+		if other.StartLine < target.StartLine && other.EndLine >= target.EndLine && other.StartLine+1 > minLine {
+			minLine = other.StartLine + 1
+		}
+	}
+
+	allowHash := hashCommentLang(path)
+	docStart := target.StartLine
+	line := target.StartLine - 1
+	for line >= minLine && line <= len(lines) {
+		trimmed := strings.TrimSpace(lines[line-1])
+		if trimmed == "" {
+			break
+		}
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#[") || strings.HasPrefix(trimmed, "@") {
+			docStart = line
+			line--
+			continue
+		}
+		if allowHash && strings.HasPrefix(trimmed, "#") {
+			docStart = line
+			line--
+			continue
+		}
+		if strings.HasSuffix(trimmed, "*/") {
+			if strings.HasPrefix(trimmed, "/*") {
+				docStart = line
+				line--
+				continue
+			}
+			// Code followed by an inline block comment (e.g. "var x = 1 /* note */") is not a doc comment.
+			if strings.Contains(trimmed, "/*") {
+				break
+			}
+			foundStart := 0
+			for k := line - 1; k >= minLine; k-- {
+				kt := strings.TrimSpace(lines[k-1])
+				if strings.HasPrefix(kt, "/*") {
+					foundStart = k
+					break
+				}
+				if strings.Contains(kt, "*/") {
+					break
+				}
+			}
+			if foundStart > 0 {
+				docStart = foundStart
+				line = foundStart - 1
+				continue
+			}
+			break
+		}
+		break
+	}
+	return docStart
+}

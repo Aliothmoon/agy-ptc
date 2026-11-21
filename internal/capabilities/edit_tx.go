@@ -660,10 +660,11 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 	var spans []span
 
 	var syms []SymbolInfo
+	var symLines []string
 	symsLoaded := false
 	outline := func() []SymbolInfo {
 		if !symsLoaded {
-			syms, _ = outlineFromSource(absPath, origBytes)
+			syms, symLines = outlineFromSource(absPath, origBytes)
 			symsLoaded = true
 		}
 		return syms
@@ -678,13 +679,14 @@ func planSingleFile(absPath, relPath string, spec FileEditSpec) (plannedFileWrit
 			if sErr != nil {
 				return plannedFileWrite{}, prefixHunkErr(sErr, hIdx)
 			}
-			if h.StartLine < s.StartLine {
-				h.StartLine = s.StartLine
+			symStart := leadingDocStartLine(symLines, syms, s, relPath)
+			if h.StartLine < symStart {
+				h.StartLine = symStart
 			}
 			if h.EndLine == 0 || h.EndLine > s.EndLine {
 				h.EndLine = s.EndLine
 			}
-			scope = h.Symbol + fmt.Sprintf(" (L%d-%d)", s.StartLine, s.EndLine)
+			scope = h.Symbol + fmt.Sprintf(" (L%d-%d)", symStart, s.EndLine)
 		}
 		normRepl := strings.ReplaceAll(h.Replacement, "\r\n", "\n")
 		if normTarget == "" {

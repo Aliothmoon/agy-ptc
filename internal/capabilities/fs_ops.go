@@ -3,9 +3,15 @@ package capabilities
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
@@ -44,6 +50,11 @@ func (b *FSSearchBinder) fileOps(env *sandbox.ExecutionEnv) map[string]sandbox.A
 		// raw fs._bytes; the bootstrap exposes fs.bytes(path, opts) returning a Buffer.
 		"_bytes": func(_ context.Context, args []any) (any, error) {
 			return b.readBytes(env.Cwd, args)
+		},
+		// fs.hash(path, algoOrOpts?): streams a file through Go crypto hash (sha256 default; sha512, sha1, md5)
+		// without loading it into JS memory (works on arbitrarily large binaries).
+		"hash": func(ctx context.Context, args []any) (any, error) {
+			return b.hashFile(ctx, env.Cwd, args)
 		},
 		// fs.mkdir(path): creates parents too (like mkdir -p); no error if it exists.
 		"mkdir": func(_ context.Context, args []any) (any, error) {
@@ -320,11 +331,110 @@ func (b *FSSearchBinder) readBytes(cwd string, args []any) (any, error) {
 		length = size - off
 	}
 	if length > MaxSandboxReadBytes {
-		return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s: %d bytes requested (>2MB); pass { offset, length }", p, length)
+		return nil, sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s: %d bytes requested (>2MB); pass { offset, length } (or use fs.hash(path) for checksums)", p, length)
 	}
 	data := make([]byte, length)
 	if _, err := f.ReadAt(data, off); err != nil && err != io.EOF {
 		return nil, err
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// hashFile implements streaming fs.hash(path, algoOrOpts?) -> hex/base64 digest string.
+func (b *FSSearchBinder) hashFile(ctx context.Context, cwd string, args []any) (string, error) {
+	if len(args) == 0 || args[0] == nil {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "missing required argument 'path'")
+	}
+	var p, algo, encoding string
+	if m, ok := args[0].(map[string]any); ok {
+		p = firstString(m, "path", "file", "file_path")
+		algo = firstString(m, "algo", "algorithm")
+		encoding = firstString(m, "encoding")
+	} else if s, ok := args[0].(string); ok {
+		p = strings.TrimSpace(s)
+		if len(args) > 1 && args[1] != nil {
+			switch second := args[1].(type) {
+			case string:
+				algo = strings.TrimSpace(second)
+			case map[string]any:
+				algo = firstString(second, "algo", "algorithm")
+				encoding = firstString(second, "encoding")
+			}
+		}
+		if len(args) > 2 && args[2] != nil {
+			if s3, ok := args[2].(string); ok && encoding == "" {
+				encoding = strings.TrimSpace(s3)
+			}
+		}
+	}
+	if p == "" {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "missing required argument 'path'")
+	}
+
+	var h hash.Hash
+	switch strings.ReplaceAll(strings.ToLower(strings.TrimSpace(algo)), "-", "") {
+	case "", "sha256":
+		h = sha256.New()
+	case "sha512":
+		h = sha512.New()
+	case "sha1":
+		h = sha1.New()
+	case "md5":
+		h = md5.New()
+	default:
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "unsupported hash algorithm %q (supported: sha256, sha512, sha1, md5)", algo)
+	}
+
+	enc := strings.ToLower(strings.TrimSpace(encoding))
+	if enc == "" {
+		enc = "hex"
+	}
+	switch enc {
+	case "hex", "base64", "base64url":
+	default:
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "unsupported encoding %q (supported: hex, base64, base64url)", encoding)
+	}
+
+	abs, err := b.Policy.ResolveAndCheckRead(cwd, p)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", sandbox.NewHostError(sandbox.KindBadArgs, nil, "%s is a directory", p)
+	}
+
+	buf := make([]byte, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, rErr := f.Read(buf)
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+		}
+		if rErr == io.EOF {
+			break
+		}
+		if rErr != nil {
+			return "", rErr
+		}
+	}
+	sum := h.Sum(nil)
+	switch enc {
+	case "base64":
+		return base64.StdEncoding.EncodeToString(sum), nil
+	case "base64url":
+		return base64.RawURLEncoding.EncodeToString(sum), nil
+	default:
+		return hex.EncodeToString(sum), nil
+	}
 }

@@ -32,6 +32,10 @@ func (b *FSSearchBinder) runListSearch(ctx context.Context, env *sandbox.Executi
 		if overflow {
 			env.AddWarning("search.rg: count output exceeded 8MB, some files are missing; narrow path/glob")
 		}
+		var he *sandbox.HostError
+		if err != nil && errors.As(err, &he) {
+			return nil, err
+		}
 	}
 	if counts == nil && (err == nil || ctx.Err() == nil) {
 		fq := q
@@ -114,7 +118,11 @@ func runRgCounts(ctx context.Context, rgBin, workspaceCwd, searchRoot string, q 
 			case 1:
 				return []fileCount{}, false, nil
 			case 2:
-				return nil, false, sandbox.NewHostError(sandbox.KindBadArgs, nil, "invalid search pattern: %s", strings.TrimSpace(stderr.String()))
+				msg := strings.TrimSpace(stderr.String())
+				if strings.Contains(strings.ToLower(msg), "regex") {
+					return nil, false, invalidRegexError(q.pattern, msg)
+				}
+				return nil, false, fmt.Errorf("invalid search pattern: %s", msg)
 			}
 		}
 		if rgCtx.Err() != nil {

@@ -893,7 +893,7 @@ func installBootstrapWrappers(vm *goja.Runtime) error {
 		const aliasMap = {
 			fs: { readFile: "read", writeFile: "write", readdir: "list", ls: "list", dir: "list", readMany: "cat", readFiles: "cat",
 				mv: "rename", move: "rename", copy: "cp", copyFile: "cp", unlink: "rm", remove: "rm", mkdirp: "mkdir",
-				readBytes: "bytes", readBinary: "bytes", readBuffer: "bytes" },
+				readBytes: "bytes", readBinary: "bytes", readBuffer: "bytes", checksum: "hash", digest: "hash" },
 			search: { grep: "rg", find: "glob", files: "glob" },
 			ast: { symbols: "outline", parse: "outline", readSymbol: "read", symbol: "read", getSymbol: "read" },
 			edit: { edit: "apply", patch: "apply" },
