@@ -111,7 +111,11 @@ func runMCP(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	eng := ptcruntime.NewEngine(*dataDir, *cwd)
+	resolvedDataDir := strings.TrimSpace(*dataDir)
+	if resolvedDataDir == "" {
+		resolvedDataDir = defaultCacheDataDir()
+	}
+	eng := ptcruntime.NewEngine(resolvedDataDir, *cwd)
 	defer eng.Close()
 
 	srv := mcpserver.NewServerWithOptions(eng, mcpserver.ServerOptions{
@@ -236,9 +240,20 @@ func runLogs(args []string, forceErrors bool) {
 		return
 	}
 
+	tailSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "tail" {
+			tailSet = true
+		}
+	})
+
 	wantErrors := *errorsOnly || *shortErr
 	if *follow || *followLong {
-		streamLogsLive(*dataDir, wantErrors, *tail)
+		liveTail := 5
+		if tailSet {
+			liveTail = max(0, *tail)
+		}
+		streamLogsLive(*dataDir, wantErrors, liveTail)
 		return
 	}
 	if *runID != "" {
@@ -258,6 +273,8 @@ func runLogs(args []string, forceErrors bool) {
 		start := 0
 		if *tail > 0 && len(entries) > *tail {
 			start = len(entries) - *tail
+		} else if *tail == 0 {
+			start = len(entries)
 		}
 		for _, e := range entries[start:] {
 			fmt.Print(audit.FormatFullStreamCard(e))
@@ -265,6 +282,16 @@ func runLogs(args []string, forceErrors bool) {
 		return
 	}
 	fmt.Print(audit.FormatLogs(entries, files, *tail, *runID))
+}
+
+func computeLiveTailStart(totalEntries, initialTail int) int {
+	if totalEntries <= 0 || initialTail <= 0 {
+		return max(0, totalEntries)
+	}
+	if initialTail >= totalEntries {
+		return 0
+	}
+	return totalEntries - initialTail
 }
 
 func streamLogsLive(explicitDataDir string, errorsOnly bool, initialTail int) {
@@ -277,7 +304,7 @@ func streamLogsLive(explicitDataDir string, errorsOnly bool, initialTail int) {
 	}
 
 	entries, files, _ := audit.LoadEntries(explicitDataDir, errorsOnly)
-	start := max(0, len(entries)-min(initialTail, 5))
+	start := computeLiveTailStart(len(entries), initialTail)
 	fmt.Printf("Watching AgyPTC live MCP calls (Ctrl+C to stop)...\n")
 	for _, e := range entries[start:] {
 		fmt.Print(audit.FormatFullStreamCard(e))
@@ -710,6 +737,20 @@ func smokeTestHook(exePath, sampleCwd string) (int, error) {
 	return len(parsed.InjectSteps[0].SystemMessage.SystemMessage), nil
 }
 
+func isAgyPTCPluginManifest(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(manifest.Name), pluginName)
+}
+
 func locateSourcePluginDir(exePath string) string {
 	exeDir := filepath.Dir(exePath)
 	candidates := []string{
@@ -721,7 +762,7 @@ func locateSourcePluginDir(exePath string) string {
 		candidates = append(candidates, filepath.Join(cwd, "plugin"), cwd)
 	}
 	for _, c := range candidates {
-		if _, err := os.Stat(filepath.Join(c, "plugin.json")); err == nil {
+		if isAgyPTCPluginManifest(c) {
 			abs, _ := filepath.Abs(c)
 			return abs
 		}

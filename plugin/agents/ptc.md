@@ -18,10 +18,6 @@ tools:
   - manage_subagents
   - send_message
   - run_workflow
-  - swarm
-  - call_mcp_tool
-  - list_resources
-  - read_resource
 inheritMcp: true
 inheritCustomizations: true
 ---

@@ -175,7 +175,7 @@ func detectGitSummary(ws string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()
 
-	statusCmd := exec.CommandContext(ctx, "git", "--no-pager", "status", "--porcelain=v1", "-b")
+	statusCmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "--no-pager", "status", "--porcelain=v1", "-b")
 	statusCmd.Dir = ws
 	statusOut, err := statusCmd.Output()
 	if err != nil {
@@ -196,7 +196,7 @@ func detectGitSummary(ws string) string {
 		}
 	}
 
-	logCmd := exec.CommandContext(ctx, "git", "--no-pager", "log", "-n", "3", "--oneline")
+	logCmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "--no-pager", "log", "-n", "3", "--oneline")
 	logCmd.Dir = ws
 	logOut, _ := logCmd.Output()
 	commits := strings.ReplaceAll(strings.TrimSpace(string(logOut)), "\n", " ; ")
@@ -269,6 +269,44 @@ func buildPrioritizedLayout(ws string) string {
 	return strings.Join(items, "\n")
 }
 
+func sanitizeStatusField(s string, maxRunes int) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inESC := false
+	runes := 0
+	for i := 0; i < len(s); i++ {
+		if inESC {
+			c := s[i]
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+				inESC = false
+			}
+			continue
+		}
+		if s[i] == 0x1b {
+			inESC = true
+			continue
+		}
+		if s[i] == '\r' || s[i] == '\n' || s[i] == '\t' {
+			b.WriteByte(' ')
+			runes++
+			continue
+		}
+		if s[i] < 0x20 || s[i] == 0x7f {
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	clean := strings.Join(strings.Fields(b.String()), " ")
+	r := []rune(clean)
+	if maxRunes > 0 && len(r) > maxRunes {
+		return string(r[:maxRunes]) + "…"
+	}
+	return clean
+}
+
 // RunStatusLine renders a compact 1-line TUI status bar for Antigravity CLI (`stack_with_default: true`).
 func RunStatusLine(in io.Reader, out io.Writer, dataDir string) {
 	_, _ = readBounded(in, 200*time.Millisecond)
@@ -286,12 +324,16 @@ func RunStatusLine(in io.Reader, out io.Writer, dataDir string) {
 	if st.Active && isLiveStatusStale(st.UpdatedAt, time.Now()) {
 		st.Active = false
 	}
+	title := sanitizeStatusField(st.Title, 64)
+	if title == "" {
+		title = "vm_exec"
+	}
 	if st.Active {
-		op := st.CurrentOp
+		op := sanitizeStatusField(st.CurrentOp, 64)
 		if op == "" {
-			op = st.Title
+			op = title
 		}
-		fmt.Fprintf(out, "\x1b[36m⚡ PTC running:\x1b[0m %s · %s (runs: %d, host ops: %d)\n", st.Title, op, st.TotalRuns, st.TotalHostOps)
+		fmt.Fprintf(out, "\x1b[36m⚡ PTC running:\x1b[0m %s · %s (runs: %d, host ops: %d)\n", title, op, st.TotalRuns, st.TotalHostOps)
 		return
 	}
 	if st.TotalRuns > 0 {
@@ -299,7 +341,7 @@ func RunStatusLine(in io.Reader, out io.Writer, dataDir string) {
 		if st.LastStatus == "error" {
 			badge = "\x1b[31m● PTC (err)\x1b[0m"
 		}
-		fmt.Fprintf(out, "%s %d runs · %d host ops compressed · last: %s (%dms)\n", badge, st.TotalRuns, st.TotalHostOps, st.Title, st.LastDurMs)
+		fmt.Fprintf(out, "%s %d runs · %d host ops compressed · last: %s (%dms)\n", badge, st.TotalRuns, st.TotalHostOps, title, st.LastDurMs)
 		return
 	}
 	fmt.Fprintf(out, "\x1b[90m○ PTC ready (Code Mode active)\x1b[0m\n")

@@ -37,9 +37,9 @@ function resolveDataDir() {
   if (envData) return envData;
   const home = homedir();
   const candidates = [
+    join(home, '.gemini', 'antigravity-cli', 'plugin_data', 'agy-ptc'),
     join(home, '.gemini', 'antigravity', 'plugin_data', 'agy-ptc'),
     join(home, '.gemini', 'config', 'plugin_data', 'agy-ptc'),
-    join(home, '.gemini', 'antigravity-cli', 'plugin_data', 'agy-ptc'),
   ];
   for (const dir of candidates) {
     if (existsSync(join(dir, 'logs'))) return dir;
@@ -147,6 +147,9 @@ function readPolicy(dataDir) {
   if (typeof local.allowNonWorkspaceAccess === 'boolean') {
     merged.allowNonWorkspaceAccess = local.allowNonWorkspaceAccess;
   }
+  if (typeof local.agyPtcTrustWorkspaceMcp === 'boolean') {
+    merged.agyPtcTrustWorkspaceMcp = local.agyPtcTrustWorkspaceMcp;
+  }
   const perms = local.permissions || {};
   merged.permissions = {
     allow: Array.isArray(perms.allow) ? perms.allow : [],
@@ -159,11 +162,14 @@ function readPolicy(dataDir) {
 function writePolicy(dataDir, payload) {
   const target = resolvePolicyPath(dataDir);
   mkdirSync(dirname(target), { recursive: true });
+  const existing = readJsonSafe(target);
+  const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
   const normList = arr =>
     Array.isArray(arr)
       ? arr.map(s => String(s ?? '').trim()).filter(Boolean)
       : [];
   const next = {
+    ...base,
     allowNonWorkspaceAccess: payload?.allowNonWorkspaceAccess !== false,
     permissions: {
       allow: normList(payload?.permissions?.allow),
@@ -171,6 +177,9 @@ function writePolicy(dataDir, payload) {
       deny: normList(payload?.permissions?.deny),
     },
   };
+  if (typeof payload?.agyPtcTrustWorkspaceMcp === 'boolean') {
+    next.agyPtcTrustWorkspaceMcp = payload.agyPtcTrustWorkspaceMcp;
+  }
   writeFileSync(target, JSON.stringify(next, null, 2) + '\n', 'utf-8');
   return { ok: true, policyFile: target, ...next };
 }
