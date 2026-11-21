@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -270,12 +271,24 @@ func streamLogsLive(explicitDataDir string, errorsOnly bool, initialTail int) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	entries, _, _ := audit.LoadEntries(explicitDataDir, errorsOnly)
-	seen := len(entries)
-	start := max(0, seen-min(initialTail, 5))
+	fileName := "executions.jsonl"
+	if errorsOnly {
+		fileName = "errors.jsonl"
+	}
+
+	entries, files, _ := audit.LoadEntries(explicitDataDir, errorsOnly)
+	start := max(0, len(entries)-min(initialTail, 5))
 	fmt.Printf("Watching AgyPTC live MCP calls (Ctrl+C to stop)...\n")
 	for _, e := range entries[start:] {
 		fmt.Print(audit.FormatFullStreamCard(e))
+	}
+
+	// Record current byte offsets so subsequent ticks read only newly appended bytes (O(delta)).
+	offsets := make(map[string]int64, len(files))
+	for _, p := range files {
+		if fi, err := os.Stat(p); err == nil {
+			offsets[p] = fi.Size()
+		}
 	}
 
 	ticker := time.NewTicker(300 * time.Millisecond)
@@ -285,19 +298,58 @@ func streamLogsLive(explicitDataDir string, errorsOnly bool, initialTail int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cur, _, err := audit.LoadEntries(explicitDataDir, errorsOnly)
-			if err != nil {
-				continue
+			for _, dir := range audit.DiscoverLogDirs(explicitDataDir) {
+				p := filepath.Join(dir, fileName)
+				fi, err := os.Stat(p)
+				if err != nil {
+					continue
+				}
+				off := offsets[p]
+				if fi.Size() < off {
+					off = 0 // log rotated or cleared
+				}
+				if fi.Size() == off {
+					continue
+				}
+				newEntries, nextOff := readJSONLDelta(p, off)
+				offsets[p] = nextOff
+				for _, e := range newEntries {
+					fmt.Print(audit.FormatFullStreamCard(e))
+				}
 			}
-			if len(cur) < seen {
-				seen = 0 // log rotated or cleared
-			}
-			for _, e := range cur[seen:] {
-				fmt.Print(audit.FormatFullStreamCard(e))
-			}
-			seen = len(cur)
 		}
 	}
+}
+
+func readJSONLDelta(path string, offset int64) ([]audit.Entry, int64) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, offset
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset
+	}
+	r := bufio.NewReaderSize(f, 64*1024)
+	var out []audit.Entry
+	cur := offset
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			cur += int64(len(line))
+			trimmed := bytes.TrimSpace(line)
+			if len(trimmed) > 0 {
+				var e audit.Entry
+				if json.Unmarshal(trimmed, &e) == nil {
+					out = append(out, e)
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return out, cur
 }
 
 func runStats(args []string) {
@@ -400,6 +452,7 @@ func runInstall(args []string) error {
 func runUninstall(args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	projectDir := fs.String("project", "", "Uninstall from <project>/.agents/plugins/agy-ptc")
+	purge := fs.Bool("purge", false, "Also remove user CLI binary and plugin_data (logs/state)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -416,13 +469,35 @@ func runUninstall(args []string) error {
 	}
 
 	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
-		fmt.Printf("Nothing to remove (%s does not exist).\n", targetDir)
-		return nil
+		fmt.Printf("Plugin directory not found (%s).\n", targetDir)
+	} else {
+		if err := os.RemoveAll(targetDir); err != nil {
+			return err
+		}
+		fmt.Printf("Removed %s from %s\n", pluginName, targetDir)
 	}
-	if err := os.RemoveAll(targetDir); err != nil {
-		return err
+
+	if *projectDir == "" && *purge {
+		binName := "agy-ptc"
+		if runtime.GOOS == "windows" {
+			binName = "agy-ptc.exe"
+		}
+		if userBinDir := detectUserBinDir(); userBinDir != "" {
+			pathBin := filepath.Join(userBinDir, binName)
+			if err := os.Remove(pathBin); err == nil {
+				fmt.Printf("Removed CLI binary %s\n", pathBin)
+			}
+		}
+		h := userHomeDir()
+		for _, d := range []string{
+			filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", pluginName),
+			filepath.Join(h, ".gemini", "antigravity", "plugin_data", pluginName),
+		} {
+			if err := os.RemoveAll(d); err == nil {
+				fmt.Printf("Removed plugin data %s\n", d)
+			}
+		}
 	}
-	fmt.Printf("Removed %s from %s\n", pluginName, targetDir)
 	return nil
 }
 
@@ -609,6 +684,7 @@ func smokeTestHook(exePath, sampleCwd string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exePath, "hook", "session-start")
+	cmd.Env = append(os.Environ(), "AGY_PTC_DRY_RUN_HOOK=1")
 	inJSON, _ := json.Marshal(map[string]any{
 		"cwd":           sampleCwd,
 		"hookEventName": "SessionStart",
@@ -661,7 +737,15 @@ func copyDirClean(src, dst string) error {
 		}
 		return nil
 	})
-	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+
+	expected := map[string]bool{
+		".":                   true,
+		"scripts":             true,
+		"scripts/agy-ptc":     true,
+		"scripts/agy-ptc.exe": true,
+	}
+
+	if err := filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -669,6 +753,8 @@ func copyDirClean(src, dst string) error {
 		if err != nil {
 			return err
 		}
+		relSlash := filepath.ToSlash(rel)
+		expected[relSlash] = true
 		target := filepath.Join(dst, rel)
 		if info.IsDir() {
 			return os.MkdirAll(target, 0o755)
@@ -678,24 +764,130 @@ func copyDirClean(src, dst string) error {
 			return err
 		}
 		mode := info.Mode().Perm()
-		if strings.HasPrefix(filepath.ToSlash(rel), "scripts/") {
+		if strings.HasPrefix(relSlash, "scripts/") {
 			mode = 0o755
 		}
 		if strings.HasSuffix(strings.ToLower(target), ".exe") {
 			return writeExecutableSafe(target, data)
 		}
-		return os.WriteFile(target, data, mode)
+		return writeFileAtomic(target, data, mode)
+	}); err != nil {
+		return err
+	}
+
+	// Remove stale files and empty directories left over from earlier plugin versions.
+	var staleDirs []string
+	_ = filepath.Walk(dst, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(dst, p)
+		if err != nil || rel == "." {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		if info.IsDir() {
+			if !expected[relSlash] {
+				staleDirs = append(staleDirs, p)
+			}
+			return nil
+		}
+		if strings.HasSuffix(relSlash, ".old") {
+			return nil
+		}
+		if !expected[relSlash] {
+			_ = os.Remove(p)
+		}
+		return nil
 	})
+	for i := len(staleDirs) - 1; i >= 0; i-- {
+		_ = os.Remove(staleDirs[i])
+	}
+	return nil
 }
 
-// writeExecutableSafe handles in-place upgrades on Windows even when the existing .exe is locked by a running MCP server.
+func writeFileAtomic(dstPath string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(dstPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".agy-ptc-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	_ = os.Chmod(tmpPath, mode)
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+// writeExecutableSafe atomically installs or replaces an executable without a truncation window,
+// and restores the previous binary if Windows hot-swap replacement fails mid-way.
 func writeExecutableSafe(dstPath string, data []byte) error {
-	if err := os.WriteFile(dstPath, data, 0o755); err == nil {
+	dir := filepath.Dir(dstPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".agy-ptc-bin-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
+
+	// Fast path: atomic direct rename works on Unix and when dstPath is absent/replaceable.
+	if err := os.Rename(tmpPath, dstPath); err == nil {
+		cleanupTmp = false
 		return nil
 	}
+
+	// Fallback for Windows locked executables: move existing binary aside, rename new one in,
+	// and roll back to the previous binary if the second rename fails.
+	if _, statErr := os.Stat(dstPath); statErr != nil {
+		return fmt.Errorf("installing executable %s: %w", dstPath, statErr)
+	}
 	oldPath := fmt.Sprintf("%s.%d.old", dstPath, time.Now().UnixNano())
-	_ = os.Rename(dstPath, oldPath)
-	return os.WriteFile(dstPath, data, 0o755)
+	if err := os.Rename(dstPath, oldPath); err != nil {
+		return fmt.Errorf("moving existing executable aside: %w", err)
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.Rename(oldPath, dstPath)
+		return fmt.Errorf("replacing executable %s: %w", dstPath, err)
+	}
+	cleanupTmp = false
+	_ = os.Remove(oldPath) // best-effort cleanup if not locked by a running process
+	return nil
 }
 
 func defaultCacheDataDir() string {

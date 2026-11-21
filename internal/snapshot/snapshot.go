@@ -81,7 +81,9 @@ func RunSessionStartHook(in io.Reader, out io.Writer) {
 		return
 	}
 
-	persistActiveWorkspaceHint(ws)
+	if os.Getenv("AGY_PTC_DRY_RUN_HOOK") != "1" && !isPluginDirectory(ws) {
+		persistActiveWorkspaceHint(ws)
+	}
 
 	snap := BuildWorkspaceSnapshot(ws, 1500)
 	if snap == "" {
@@ -281,6 +283,9 @@ func RunStatusLine(in io.Reader, out io.Writer, dataDir string) {
 			_ = json.Unmarshal(raw, &st)
 		}
 	}
+	if st.Active && isLiveStatusStale(st.UpdatedAt, time.Now()) {
+		st.Active = false
+	}
 	if st.Active {
 		op := st.CurrentOp
 		if op == "" {
@@ -335,16 +340,71 @@ func persistActiveWorkspaceHint(ws string) {
 	var dirs []string
 	if pd := strings.TrimSpace(os.Getenv("PLUGIN_DATA")); pd != "" {
 		dirs = append(dirs, pd)
-	}
-	if h, hErr := os.UserHomeDir(); hErr == nil && h != "" {
+	} else if h, hErr := os.UserHomeDir(); hErr == nil && h != "" {
 		dirs = append(dirs,
 			filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", "agy-ptc"),
 			filepath.Join(h, ".gemini", "antigravity", "plugin_data", "agy-ptc"),
 		)
 	}
 	for _, d := range dirs {
-		if os.MkdirAll(d, 0o755) == nil {
-			_ = os.WriteFile(filepath.Join(d, "active-workspace.json"), payload, 0o600)
+		if os.MkdirAll(d, 0o755) != nil {
+			continue
+		}
+		target := filepath.Join(d, "active-workspace.json")
+		tmp, tmpErr := os.CreateTemp(d, ".active-workspace-*.tmp")
+		if tmpErr != nil {
+			continue
+		}
+		tmpPath := tmp.Name()
+		if _, wErr := tmp.Write(payload); wErr == nil && tmp.Close() == nil {
+			_ = os.Chmod(tmpPath, 0o600)
+			if os.Rename(tmpPath, target) != nil {
+				_ = os.Remove(tmpPath)
+			}
+		} else {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
 		}
 	}
+}
+
+func isPluginDirectory(ws string) bool {
+	abs, err := filepath.Abs(ws)
+	if err != nil {
+		abs = ws
+	}
+	norm := strings.ToLower(filepath.ToSlash(filepath.Clean(abs)))
+	if pr := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); pr != "" {
+		if prAbs, err := filepath.Abs(pr); err == nil {
+			pr = prAbs
+		}
+		normPR := strings.ToLower(filepath.ToSlash(filepath.Clean(pr)))
+		if norm == normPR || strings.HasPrefix(norm, normPR+"/") {
+			return true
+		}
+	}
+	if strings.Contains(norm, "/.gemini/config/plugins/agy-ptc") || strings.Contains(norm, "/.agents/plugins/agy-ptc") {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(abs, "plugin.json")); err == nil {
+		return true
+	}
+	return false
+}
+
+const staleLiveStatusThreshold = 150 * time.Second
+
+func isLiveStatusStale(updatedAt string, now time.Time) bool {
+	s := strings.TrimSpace(updatedAt)
+	if s == "" {
+		return true
+	}
+	ts, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		ts, err = time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			return true
+		}
+	}
+	return now.Sub(ts) > staleLiveStatusThreshold
 }
