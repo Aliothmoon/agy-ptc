@@ -224,6 +224,7 @@ func runLogs(args []string, forceErrors bool) {
 	runID := fs.String("id", "", "Inspect full TypeScript source and trace for a specific run ID")
 	dataDir := fs.String("data-dir", "", "Explicit plugin data directory")
 	asJSON := fs.Bool("json", false, "Output raw JSON array")
+	compact := fs.Bool("compact", false, "Omit full source/result bodies in JSON output")
 	clearLogs := fs.Bool("clear", false, "Delete recorded execution/error JSONL logs")
 	_ = fs.Parse(args)
 
@@ -271,7 +272,7 @@ func runLogs(args []string, forceErrors bool) {
 	}
 	if *asJSON {
 		filtered := audit.FilterEntries(entries, *tail, *runID)
-		raw, _ := json.MarshalIndent(filtered, "", "  ")
+		raw, _ := audit.MarshalEntriesJSON(filtered, *full || *runID != "", *compact)
 		fmt.Println(string(raw))
 		return
 	}

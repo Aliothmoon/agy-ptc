@@ -398,4 +398,36 @@ func TestRunLogsJSONRespectsTailAndID(t *testing.T) {
 	if len(byID) != 1 || byID[0]["id"] != "ptc_test_c" {
 		t.Fatalf("expected --id test_c to return [ptc_test_c], got %+v", byID)
 	}
+
+	// Verify >384KB executions.jsonl auto-compacts under --json --tail 80 so sh.run (512KB cap) never truncates JSON!
+	var bigExec strings.Builder
+	bigCode := strings.Repeat("const padding = '0123456789abcdef';\n", 400) // ~14KB per entry -> 80 entries > 1.1MB raw
+	codeJSON, _ := json.Marshal(bigCode)
+	for i := 1; i <= 80; i++ {
+		bigExec.WriteString(`{"id":"ptc_big_` + strconv.Itoa(i) + `","timestamp":"2026-11-23T01:00:00Z","status":"ok","code":` + string(codeJSON) + `,"resultPreview":` + string(codeJSON) + `}` + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(logsDir, "executions.jsonl"), []byte(bigExec.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	tmpOut := filepath.Join(t.TempDir(), "big.json")
+	fOut, err := os.Create(tmpOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = fOut
+	runLogs([]string{"--data-dir", dataDir, "--json", "--tail", "80"}, false)
+	_ = fOut.Close()
+	os.Stdout = origStdout
+	rawBig, err := os.ReadFile(tmpOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawBig) > 240*1024 {
+		t.Fatalf("expected auto-compacted JSON <= 240KB to fit inside sh.run 256KB cap, got %d bytes", len(rawBig))
+	}
+	var parsedBig []map[string]any
+	if err := json.Unmarshal(rawBig, &parsedBig); err != nil || len(parsedBig) != 80 {
+		t.Fatalf("expected valid 80-entry JSON after auto-compaction, got len=%d err=%v", len(parsedBig), err)
+	}
 }
