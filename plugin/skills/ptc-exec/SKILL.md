@@ -40,8 +40,8 @@ await t.edit("internal/service/handler.go", [
 
 const check = await t.verify([
   { name: "vet", command: "go vet ./..." },
-  { name: "unit", command: "go test ./internal/service/..." },
-]);
+  { name: "unit", command: "go test ./internal/service/...", cwd: "." },
+]); // Also accepts string[] and top-level { cwd, concurrency, timeoutSec, compact }
 
 if (!check.ok) {
   await t.rollback();

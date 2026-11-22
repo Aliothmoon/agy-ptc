@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aliothmoon/mcplex/pkg/output"
@@ -134,9 +136,30 @@ func BuildWorkspaceSnapshot(workspaceDir string, maxBytes int) string {
 	return output.FitSectionsToByteBudget(sections, maxBytes, "\n")
 }
 
+var (
+	gradleRootNameRe = regexp.MustCompile(`rootProject\.name\s*=\s*["']([^"']+)["']`)
+	gradleIncludeRe  = regexp.MustCompile(`["'](:?[A-Za-z0-9_.:-]+)["']`)
+	tomlKeyStringRe  = regexp.MustCompile(`^([A-Za-z0-9_-]+)\s*=\s*["']([^"']+)["']`)
+	quotedItemRe     = regexp.MustCompile(`["']([^"']+)["']`)
+)
+
+func readFileHead(path string, maxBytes int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, maxBytes)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
 func detectProjectSummary(ws string) string {
 	var parts []string
-	if raw, err := os.ReadFile(filepath.Join(ws, "go.mod")); err == nil {
+	if raw, err := readFileHead(filepath.Join(ws, "go.mod"), 16*1024); err == nil {
 		for _, line := range strings.Split(string(raw), "\n") {
 			t := strings.TrimSpace(line)
 			if strings.HasPrefix(t, "module ") || strings.HasPrefix(t, "go ") {
@@ -144,10 +167,40 @@ func detectProjectSummary(ws string) string {
 			}
 		}
 	}
-	if raw, err := os.ReadFile(filepath.Join(ws, "package.json")); err == nil {
+	if raw, err := readFileHead(filepath.Join(ws, "go.work"), 8*1024); err == nil {
+		var mods []string
+		inUse := false
+		for _, line := range strings.Split(string(raw), "\n") {
+			t := strings.TrimSpace(strings.SplitN(line, "//", 2)[0])
+			if t == "" {
+				continue
+			}
+			if strings.HasPrefix(t, "use (") {
+				inUse = true
+				continue
+			}
+			if inUse {
+				if t == ")" {
+					inUse = false
+					continue
+				}
+				mods = append(mods, strings.Trim(t, `"`))
+			} else if strings.HasPrefix(t, "use ") {
+				mods = append(mods, strings.Trim(strings.TrimSpace(strings.TrimPrefix(t, "use ")), `"`))
+			}
+		}
+		if len(mods) > 6 {
+			mods = mods[:6]
+		}
+		if len(mods) > 0 {
+			parts = append(parts, fmt.Sprintf("go.work=[%s]", strings.Join(mods, ",")))
+		}
+	}
+	if raw, err := readFileHead(filepath.Join(ws, "package.json"), 32*1024); err == nil {
 		var pkg struct {
-			Name    string            `json:"name"`
-			Scripts map[string]string `json:"scripts"`
+			Name           string            `json:"name"`
+			PackageManager string            `json:"packageManager"`
+			Scripts        map[string]string `json:"scripts"`
 		}
 		if json.Unmarshal(raw, &pkg) == nil {
 			var scriptKeys []string
@@ -158,12 +211,25 @@ func detectProjectSummary(ws string) string {
 			if len(scriptKeys) > 8 {
 				scriptKeys = scriptKeys[:8]
 			}
-			if pkg.Name != "" {
-				parts = append(parts, fmt.Sprintf("npm(%s) scripts=[%s]", pkg.Name, strings.Join(scriptKeys, ",")))
+			pm := "npm"
+			if idx := strings.IndexByte(pkg.PackageManager, '@'); idx > 0 {
+				pm = pkg.PackageManager[:idx]
+			}
+			if pkg.Name != "" || len(scriptKeys) > 0 {
+				parts = append(parts, fmt.Sprintf("%s(%s) scripts=[%s]", pm, pkg.Name, strings.Join(scriptKeys, ",")))
 			}
 		}
 	}
-	for _, marker := range []string{"Cargo.toml", "pyproject.toml", "Makefile", "Taskfile.yml"} {
+	if gSummary := detectGradleSummary(ws); gSummary != "" {
+		parts = append(parts, gSummary)
+	}
+	if cSummary := detectCargoSummary(ws); cSummary != "" {
+		parts = append(parts, cSummary)
+	}
+	if pySummary := detectPyprojectSummary(ws); pySummary != "" {
+		parts = append(parts, pySummary)
+	}
+	for _, marker := range []string{"CMakeLists.txt", "Makefile", "Taskfile.yml"} {
 		if _, err := os.Stat(filepath.Join(ws, marker)); err == nil {
 			parts = append(parts, marker)
 		}
@@ -171,14 +237,179 @@ func detectProjectSummary(ws string) string {
 	return strings.Join(parts, " | ")
 }
 
+func detectGradleSummary(ws string) string {
+	for _, name := range []string{"settings.gradle.kts", "settings.gradle"} {
+		raw, err := readFileHead(filepath.Join(ws, name), 24*1024)
+		if err != nil {
+			continue
+		}
+		text := string(raw)
+		rootName := ""
+		if m := gradleRootNameRe.FindStringSubmatch(text); m != nil {
+			rootName = m[1]
+		}
+		var mods []string
+		seen := map[string]bool{}
+		for _, line := range strings.Split(text, "\n") {
+			t := strings.TrimSpace(strings.SplitN(line, "//", 2)[0])
+			if !strings.HasPrefix(t, "include") {
+				continue
+			}
+			for _, im := range gradleIncludeRe.FindAllStringSubmatch(t, -1) {
+				mod := im[1]
+				if mod != "" && !seen[mod] {
+					seen[mod] = true
+					mods = append(mods, mod)
+					if len(mods) >= 8 {
+						break
+					}
+				}
+			}
+			if len(mods) >= 8 {
+				break
+			}
+		}
+		if rootName != "" && len(mods) > 0 {
+			return fmt.Sprintf("gradle(%s) modules=[%s]", rootName, strings.Join(mods, ","))
+		}
+		if rootName != "" {
+			return fmt.Sprintf("gradle(%s)", rootName)
+		}
+		if len(mods) > 0 {
+			return fmt.Sprintf("gradle modules=[%s]", strings.Join(mods, ","))
+		}
+		return name
+	}
+	for _, name := range []string{"build.gradle.kts", "build.gradle"} {
+		if _, err := os.Stat(filepath.Join(ws, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+func detectCargoSummary(ws string) string {
+	raw, err := readFileHead(filepath.Join(ws, "Cargo.toml"), 24*1024)
+	if err != nil {
+		return ""
+	}
+	section := ""
+	pkgName := ""
+	inMembers := false
+	var members []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		t := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+			section = strings.TrimSpace(t[1 : len(t)-1])
+			inMembers = false
+			continue
+		}
+		if section == "package" && pkgName == "" {
+			if m := tomlKeyStringRe.FindStringSubmatch(t); m != nil && m[1] == "name" {
+				pkgName = m[2]
+			}
+		}
+		if section == "workspace" {
+			if strings.HasPrefix(t, "members") && strings.Contains(t, "[") {
+				inMembers = true
+			}
+			if inMembers {
+				for _, q := range quotedItemRe.FindAllStringSubmatch(t, -1) {
+					if len(members) < 8 {
+						members = append(members, q[1])
+					}
+				}
+				if strings.Contains(t, "]") {
+					inMembers = false
+				}
+			}
+		}
+	}
+	if len(members) > 0 {
+		if pkgName != "" {
+			return fmt.Sprintf("cargo(%s) workspace=[%s]", pkgName, strings.Join(members, ","))
+		}
+		return fmt.Sprintf("cargo workspace=[%s]", strings.Join(members, ","))
+	}
+	if pkgName != "" {
+		return fmt.Sprintf("cargo(%s)", pkgName)
+	}
+	return "Cargo.toml"
+}
+
+func detectPyprojectSummary(ws string) string {
+	raw, err := readFileHead(filepath.Join(ws, "pyproject.toml"), 24*1024)
+	if err != nil {
+		return ""
+	}
+	text := string(raw)
+	section := ""
+	projName := ""
+	toolSet := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+			section = strings.TrimSpace(t[1 : len(t)-1])
+			for _, tool := range []string{"uv", "poetry", "ruff", "pytest", "mypy"} {
+				if section == "tool."+tool || strings.HasPrefix(section, "tool."+tool+".") {
+					toolSet[tool] = true
+				}
+			}
+			continue
+		}
+		if (section == "project" || section == "tool.poetry") && projName == "" {
+			if m := tomlKeyStringRe.FindStringSubmatch(t); m != nil && m[1] == "name" {
+				projName = m[2]
+			}
+		}
+	}
+	var tools []string
+	for _, tool := range []string{"uv", "poetry", "ruff", "pytest", "mypy"} {
+		if toolSet[tool] {
+			tools = append(tools, tool)
+		}
+	}
+	if projName != "" && len(tools) > 0 {
+		return fmt.Sprintf("python(%s) tools=[%s]", projName, strings.Join(tools, ","))
+	}
+	if projName != "" {
+		return fmt.Sprintf("python(%s)", projName)
+	}
+	return "pyproject.toml"
+}
+
 func detectGitSummary(ws string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()
 
-	statusCmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "--no-pager", "status", "--porcelain=v1", "-b")
-	statusCmd.Dir = ws
-	statusOut, err := statusCmd.Output()
-	if err != nil {
+	var (
+		statusOut []byte
+		statusErr error
+		logOut    []byte
+		wg        sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		statusCmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "--no-pager", "status", "--porcelain=v1", "-b")
+		statusCmd.Dir = ws
+		statusOut, statusErr = statusCmd.Output()
+	}()
+	go func() {
+		defer wg.Done()
+		logCmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "--no-pager", "log", "-n", "3", "--oneline")
+		logCmd.Dir = ws
+		logOut, _ = logCmd.Output()
+	}()
+	wg.Wait()
+
+	if statusErr != nil {
 		return ""
 	}
 	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
@@ -196,9 +427,6 @@ func detectGitSummary(ws string) string {
 		}
 	}
 
-	logCmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "--no-pager", "log", "-n", "3", "--oneline")
-	logCmd.Dir = ws
-	logOut, _ := logCmd.Output()
 	commits := strings.ReplaceAll(strings.TrimSpace(string(logOut)), "\n", " ; ")
 
 	dirtySummary := "clean"

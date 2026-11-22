@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +50,34 @@ function resolveDataDir() {
   return join(home, '.gemini', 'cache', 'agy-ptc');
 }
 
+export function discoverLogDirs(primaryDataDir) {
+  const explicit = (process.env.PLUGIN_DATA || '').trim();
+  if (explicit) {
+    const dir = join(explicit, 'logs');
+    return existsSync(dir) ? [dir] : [];
+  }
+  const home = homedir();
+  const candidates = [
+    primaryDataDir ? join(primaryDataDir, 'logs') : '',
+    join(home, '.gemini', 'antigravity-cli', 'plugin_data', 'agy-ptc', 'logs'),
+    join(home, '.gemini', 'antigravity', 'plugin_data', 'agy-ptc', 'logs'),
+    join(home, '.gemini', 'config', 'plugin_data', 'agy-ptc', 'logs'),
+    join(home, '.gemini', 'cache', 'agy-ptc', 'logs'),
+  ].filter(Boolean);
+
+  const seen = new Set();
+  const out = [];
+  for (const c of candidates) {
+    const key = process.platform === 'win32' ? resolve(c).toLowerCase() : resolve(c);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      if (statSync(c).isDirectory()) out.push(c);
+    } catch {}
+  }
+  return out;
+}
+
 function resolveBinary(pluginRoot) {
   const localBin = join(pluginRoot, 'scripts', BIN_NAME);
   if (existsSync(localBin)) return localBin;
@@ -66,15 +94,42 @@ function readJsonSafe(filePath, fallback = null) {
   }
 }
 
-function readJsonlEntries(filePath, maxBytes = 4 * 1024 * 1024) {
+const jsonlTailCache = new Map();
+
+// Streams only the trailing `<= maxBytes` slice from disk and memoizes by (mtimeMs, size)
+// so 2.5s UI polling performs 0 disk reads and 0 JSON parses while idle.
+export function readJsonlEntries(filePath, maxBytes = 4 * 1024 * 1024) {
   try {
     if (!existsSync(filePath)) return [];
     const st = statSync(filePath);
-    let raw = readFileSync(filePath, 'utf-8');
-    if (st.size > maxBytes) {
-      const idx = raw.indexOf('\n', raw.length - maxBytes);
-      raw = idx >= 0 ? raw.slice(idx + 1) : raw;
+    if (st.size === 0) return [];
+
+    const cached = jsonlTailCache.get(filePath);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size && cached.maxBytes === maxBytes) {
+      return cached.entries;
     }
+
+    const offset = Math.max(0, st.size - maxBytes);
+    const len = st.size - offset;
+    const buf = Buffer.allocUnsafe(len);
+    const fd = openSync(filePath, 'r');
+    let bytesRead = 0;
+    try {
+      while (bytesRead < len) {
+        const n = readSync(fd, buf, bytesRead, len - bytesRead, offset + bytesRead);
+        if (n <= 0) break;
+        bytesRead += n;
+      }
+    } finally {
+      closeSync(fd);
+    }
+
+    let raw = buf.subarray(0, bytesRead).toString('utf-8');
+    if (offset > 0) {
+      const nl = raw.indexOf('\n');
+      raw = nl >= 0 ? raw.slice(nl + 1) : '';
+    }
+
     const entries = [];
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();
@@ -83,37 +138,107 @@ function readJsonlEntries(filePath, maxBytes = 4 * 1024 * 1024) {
         entries.push(JSON.parse(trimmed));
       } catch {}
     }
+
+    if (jsonlTailCache.size >= 16 && !jsonlTailCache.has(filePath)) {
+      const oldestKey = jsonlTailCache.keys().next().value;
+      if (oldestKey) jsonlTailCache.delete(oldestKey);
+    }
+    jsonlTailCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, maxBytes, entries });
     return entries;
   } catch {
     return [];
   }
 }
 
-function computeStats(entries) {
+function loadMergedEntries(primaryDataDir, errorsOnly = false) {
+  const fileName = errorsOnly ? 'errors.jsonl' : 'executions.jsonl';
+  const dirs = discoverLogDirs(primaryDataDir);
+  if (dirs.length === 0) return [];
+  if (dirs.length === 1) {
+    return readJsonlEntries(join(dirs[0], fileName));
+  }
+  const seen = new Set();
+  const merged = [];
+  for (const d of dirs) {
+    for (const e of readJsonlEntries(join(d, fileName))) {
+      const key = e.id ? `${e.id}:${e.timestamp || ''}` : '';
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      merged.push(e);
+    }
+  }
+  merged.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+  return merged;
+}
+
+export function computeStats(entries) {
   const stats = {
     totalRuns: entries.length,
     okRuns: 0,
+    partialRuns: 0,
     errorRuns: 0,
     spilledRuns: 0,
+    totalOps: 0,
+    opsPerRun: 0,
     avgDurationMs: 0,
     categories: {},
+    failingCapabilities: [],
   };
   let totalDur = 0;
+  const capTotal = {};
+  const capFail = {};
+  const capSample = {};
+
   for (const e of entries) {
     totalDur += Number(e.durationMs || 0);
+    stats.totalOps += Number(e.hostOps || 0);
     if (e.autoSpilled) stats.spilledRuns++;
-    const isErr = e.status !== 'ok' || Number(e.failedOps || 0) > 0;
-    if (isErr) {
-      stats.errorRuns++;
-      const cat = e.errorCategory || e.status || 'unknown';
-      stats.categories[cat] = (stats.categories[cat] || 0) + 1;
-    } else {
+
+    if (e.status === 'ok' && !Number(e.failedOps || 0)) {
       stats.okRuns++;
+    } else if (e.status === 'partial_op_error') {
+      stats.partialRuns++;
+    } else {
+      stats.errorRuns++;
+    }
+
+    if (e.errorCategory) {
+      stats.categories[e.errorCategory] = (stats.categories[e.errorCategory] || 0) + 1;
+    } else if (e.status && e.status !== 'ok') {
+      stats.categories[e.status] = (stats.categories[e.status] || 0) + 1;
+    }
+
+    if (Array.isArray(e.traces)) {
+      for (const tr of e.traces) {
+        const cap = tr.capability || tr.op || '';
+        if (!cap) continue;
+        capTotal[cap] = (capTotal[cap] || 0) + 1;
+        const isTraceErr = tr.status ? tr.status === 'error' : tr.ok === false;
+        if (isTraceErr) {
+          capFail[cap] = (capFail[cap] || 0) + 1;
+          if (!capSample[cap] && tr.error) {
+            capSample[cap] = String(tr.error).slice(0, 110);
+          }
+        }
+      }
     }
   }
+
   if (entries.length > 0) {
     stats.avgDurationMs = Math.round(totalDur / entries.length);
+    stats.opsPerRun = Number((stats.totalOps / entries.length).toFixed(1));
   }
+
+  stats.failingCapabilities = Object.keys(capFail)
+    .sort((a, b) => capFail[b] - capFail[a] || a.localeCompare(b))
+    .slice(0, 8)
+    .map(cap => ({
+      capability: cap,
+      failed: capFail[cap],
+      total: capTotal[cap] || capFail[cap],
+      sample: capSample[cap] || '',
+    }));
+
   return stats;
 }
 
@@ -232,7 +357,7 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
       lastStatus: 'idle',
       updatedAt: '',
     });
-    const execEntries = readJsonlEntries(join(dataDir, 'logs', 'executions.jsonl'));
+    const execEntries = loadMergedEntries(dataDir, false);
     const stats = computeStats(execEntries);
     const policy = readPolicy(dataDir);
     return {
@@ -254,11 +379,11 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') || 50)));
     const q = (url.searchParams.get('q') || '').trim().toLowerCase();
 
-    const logFile = join(dataDir, 'logs', errorsOnly ? 'errors.jsonl' : 'executions.jsonl');
-    let entries = readJsonlEntries(logFile);
+    let entries = loadMergedEntries(dataDir, errorsOnly);
     if (q) {
       entries = entries.filter(e => {
-        const hay = `${e.id || ''} ${e.title || ''} ${e.status || ''} ${e.errorMessage || ''} ${e.cwd || ''}`.toLowerCase();
+        const caps = Array.isArray(e.traces) ? e.traces.map(tr => tr.capability || tr.op || '').join(' ') : '';
+        const hay = `${e.id || ''} ${e.title || ''} ${e.status || ''} ${e.errorCategory || ''} ${e.errorMessage || ''} ${e.cwd || ''} ${caps}`.toLowerCase();
         return hay.includes(q);
       });
     }
@@ -270,11 +395,12 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   }, 'GET');
 
   app.api('/api/logs/clear', () => {
-    const logsDir = join(dataDir, 'logs');
-    mkdirSync(logsDir, { recursive: true });
-    for (const name of ['executions.jsonl', 'errors.jsonl']) {
-      const p = join(logsDir, name);
-      if (existsSync(p)) writeFileSync(p, '', 'utf-8');
+    for (const logsDir of discoverLogDirs(dataDir)) {
+      for (const name of ['executions.jsonl', 'errors.jsonl', 'executions.jsonl.1', 'errors.jsonl.1']) {
+        const p = join(logsDir, name);
+        if (existsSync(p)) writeFileSync(p, '', 'utf-8');
+        jsonlTailCache.delete(p);
+      }
     }
     return { ok: true };
   }, 'POST');

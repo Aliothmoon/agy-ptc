@@ -87,11 +87,14 @@ export function buildUiHtml() {
     .dot.err { background: var(--ptc-red); }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-    .grid-4 {
+    .grid-5 {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 6px;
       margin-bottom: 10px;
+    }
+    @media (max-width: 480px) {
+      .grid-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     .stat-card {
       background: var(--ptc-surface);
@@ -256,9 +259,10 @@ export function buildUiHtml() {
     </div>
 
     <div id="tab-logs">
-      <div class="grid-4">
+      <div class="grid-5">
         <div class="stat-card"><div class="stat-label" id="t-lbl-total"></div><div class="stat-val" id="st-total">0</div></div>
         <div class="stat-card"><div class="stat-label" id="t-lbl-rate"></div><div class="stat-val" id="st-rate">-</div></div>
+        <div class="stat-card"><div class="stat-label" id="t-lbl-ops"></div><div class="stat-val" id="st-ops">-</div></div>
         <div class="stat-card"><div class="stat-label" id="t-lbl-dur"></div><div class="stat-val" id="st-dur">-</div></div>
         <div class="stat-card"><div class="stat-label" id="t-lbl-spill"></div><div class="stat-val" id="st-spill">0</div></div>
       </div>
@@ -317,6 +321,8 @@ export function buildUiHtml() {
           </div>
         </div>
         <div id="diag-cats" style="margin-top:8px;"></div>
+        <div class="sec-label" id="t-diag-caps-title" style="margin-top:10px;"></div>
+        <div id="diag-caps" style="margin-top:6px;"></div>
       </div>
 
       <div class="card">
@@ -350,6 +356,7 @@ export function buildUiHtml() {
         recentPrefix: 'Last: ',
         totalRuns: 'Total Runs',
         successRate: 'Success Rate',
+        opsPerRun: 'Ops / Turn',
         avgDuration: 'Avg Duration',
         autoSpilled: 'State Spills',
         latestFallback: 'Latest PTC Execution',
@@ -374,8 +381,10 @@ export function buildUiHtml() {
         policySaveFailed: 'Failed to save policy.',
         savePolicy: 'Save Policy',
         errorHotspots: 'Error Distribution',
+        failingCaps: 'Top Failing Host Capabilities',
         dataDirPrefix: 'Data directory: ',
         noErrors: 'No errors recorded.',
+        noCapFailures: 'No capability errors recorded.',
         doctorTitle: 'Environment Diagnostics (Doctor)',
         runDoctor: 'Run Doctor',
         doctorHint: 'Run Doctor to verify MCP handshake, SessionStart hook latency, and ripgrep availability.',
@@ -397,6 +406,7 @@ export function buildUiHtml() {
         recentPrefix: '最近: ',
         totalRuns: '总执行次数',
         successRate: '成功率',
+        opsPerRun: '单轮压缩操作',
         avgDuration: '平均耗时',
         autoSpilled: '状态转存',
         latestFallback: '最近一次 PTC 调用',
@@ -421,8 +431,10 @@ export function buildUiHtml() {
         policySaveFailed: '保存策略失败。',
         savePolicy: '保存策略',
         errorHotspots: '错误分类统计',
+        failingCaps: '高频失败宿主能力',
         dataDirPrefix: '数据目录: ',
         noErrors: '暂无错误记录。',
+        noCapFailures: '暂无能力调用错误。',
         doctorTitle: '环境诊断 (Doctor)',
         runDoctor: '运行诊断',
         doctorHint: '运行诊断以检查 MCP 握手、SessionStart 钩子延迟及 ripgrep 可用性。',
@@ -462,6 +474,7 @@ export function buildUiHtml() {
       document.getElementById('btn-lang').textContent = t('langBtn');
       document.getElementById('t-lbl-total').textContent = t('totalRuns');
       document.getElementById('t-lbl-rate').textContent = t('successRate');
+      document.getElementById('t-lbl-ops').textContent = t('opsPerRun');
       document.getElementById('t-lbl-dur').textContent = t('avgDuration');
       document.getElementById('t-lbl-spill').textContent = t('autoSpilled');
       document.getElementById('log-search').placeholder = t('searchPlaceholder');
@@ -475,6 +488,7 @@ export function buildUiHtml() {
       document.getElementById('pol-msg').textContent = t('policyHint');
       document.getElementById('btn-save-policy').textContent = t('savePolicy');
       document.getElementById('t-diag-cats-title').textContent = t('errorHotspots');
+      document.getElementById('t-diag-caps-title').textContent = t('failingCaps');
       document.getElementById('t-diag-doc-title').textContent = t('doctorTitle');
       document.getElementById('btn-doctor').textContent = t('runDoctor');
       document.getElementById('t-diag-bench-title').textContent = t('benchTitle');
@@ -540,8 +554,10 @@ export function buildUiHtml() {
         : (ls.lastStatus && ls.lastStatus !== 'idle' ? (t('recentPrefix') + ls.lastStatus + ' · ' + (ls.lastDurationMs || 0) + 'ms') : t('ready'));
 
       document.getElementById('st-total').textContent = st.totalRuns ?? 0;
-      const rate = st.totalRuns > 0 ? Math.round(((st.okRuns || 0) / st.totalRuns) * 100) + '%' : '-';
+      const okTotal = (st.okRuns || 0) + (st.partialRuns || 0);
+      const rate = st.totalRuns > 0 ? Math.round((okTotal / st.totalRuns) * 100) + '%' : '-';
       document.getElementById('st-rate').textContent = rate;
+      document.getElementById('st-ops').textContent = st.totalRuns > 0 ? ((st.opsPerRun || 0) + 'x') : '-';
       document.getElementById('st-dur').textContent = st.totalRuns > 0 ? ((st.avgDurationMs || 0) + 'ms') : '-';
       document.getElementById('st-spill').textContent = st.spilledRuns ?? 0;
 
@@ -563,6 +579,16 @@ export function buildUiHtml() {
       document.getElementById('diag-cats').innerHTML = catKeys.length
         ? catKeys.map(k => '<span class="badge err" style="margin-right:6px;margin-bottom:4px;">' + esc(k) + ': ' + cats[k] + '</span>').join('')
         : '<span class="muted">' + esc(t('noErrors')) + '</span>';
+
+      const fcaps = Array.isArray(st.failingCapabilities) ? st.failingCapabilities : [];
+      document.getElementById('diag-caps').innerHTML = fcaps.length
+        ? fcaps.map(fc =>
+            '<div class="muted" style="margin-bottom:4px;">' +
+              '<span class="badge warn" style="margin-right:6px;">' + esc(fc.capability) + ' ' + fc.failed + '/' + fc.total + '</span>' +
+              (fc.sample ? '<span style="font-family:var(--ptc-mono);font-size:11px;">' + esc(fc.sample) + '</span>' : '') +
+            '</div>'
+          ).join('')
+        : '<span class="muted">' + esc(t('noCapFailures')) + '</span>';
     }
 
     async function refreshOverview() {
@@ -586,7 +612,13 @@ export function buildUiHtml() {
         const open = state.expanded.has(e.id);
         const bc = badgeClass(e.status, e.failedOps);
         const tracesText = Array.isArray(e.traces) && e.traces.length
-          ? e.traces.map(tr => (tr.ok ? 'OK  ' : 'ERR ') + (tr.op || '') + ' (' + (tr.durationMs || 0) + 'ms)' + (tr.error ? ' -> ' + tr.error : '')).join('\\n')
+          ? e.traces.map(tr => {
+              const ok = tr.status ? tr.status === 'ok' : Boolean(tr.ok);
+              const cap = tr.capability || tr.op || '';
+              const target = tr.target ? '(' + tr.target + ')' : '';
+              const wave = tr.wave ? ' [w' + tr.wave + ']' : '';
+              return (ok ? 'OK  ' : 'ERR ') + cap + target + ' (' + (tr.durationMs || 0) + 'ms)' + wave + (tr.error ? ' -> ' + tr.error : '');
+            }).join('\\n')
           : '';
         return '<div class="log-item">' +
           '<div class="log-head" data-id="' + esc(e.id) + '">' +

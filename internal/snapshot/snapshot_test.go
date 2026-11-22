@@ -118,3 +118,41 @@ func TestStatusLineStaleActiveFallsBackToIdle(t *testing.T) {
 		t.Fatalf("fresh active live-status should render as running, got: %s", out.String())
 	}
 }
+
+func TestDetectProjectSummaryPolyglotManifests(t *testing.T) {
+	// 1. Gradle Kotlin multi-module workspace
+	gradleWs := t.TempDir()
+	settingsKts := "rootProject.name = \"maafw-android\"\ninclude(\":app\", \":core:ui\")\ninclude(\":feature:sync\")\n"
+	if err := os.WriteFile(filepath.Join(gradleWs, "settings.gradle.kts"), []byte(settingsKts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotGradle := detectProjectSummary(gradleWs)
+	if !strings.Contains(gotGradle, "gradle(maafw-android)") || !strings.Contains(gotGradle, ":app,:core:ui,:feature:sync") {
+		t.Fatalf("unexpected Gradle summary: %q", gotGradle)
+	}
+
+	// 2. Cargo workspace + Python pyproject.toml + Go go.work
+	polyWs := t.TempDir()
+	cargoToml := "[package]\nname = \"zvec-core\"\n\n[workspace]\nmembers = [\n  \"crates/indexer\",\n  \"crates/cli\",\n]\n"
+	pyproject := "[project]\nname = \"ptc-workflows\"\n\n[tool.uv]\ndev-dependencies = []\n[tool.ruff]\nline-length = 100\n"
+	goWork := "go 1.27\n\nuse (\n\t./AgyPTC\n\t../MCPlex\n)\n"
+	for name, body := range map[string]string{
+		"Cargo.toml":     cargoToml,
+		"pyproject.toml": pyproject,
+		"go.work":        goWork,
+	} {
+		if err := os.WriteFile(filepath.Join(polyWs, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gotPoly := detectProjectSummary(polyWs)
+	for _, want := range []string{
+		"go.work=[./AgyPTC,../MCPlex]",
+		"cargo(zvec-core) workspace=[crates/indexer,crates/cli]",
+		"python(ptc-workflows) tools=[uv,ruff]",
+	} {
+		if !strings.Contains(gotPoly, want) {
+			t.Fatalf("expected %q in polyglot summary, got: %q", want, gotPoly)
+		}
+	}
+}
