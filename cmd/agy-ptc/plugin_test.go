@@ -340,3 +340,62 @@ console.log(JSON.stringify({ count: entries.length, opsPerRun: stats.opsPerRun, 
 		t.Fatalf("expected failingCapabilities to capture t.edit trace error, got: %s", s)
 	}
 }
+
+func TestRunLogsJSONRespectsTailAndID(t *testing.T) {
+	dataDir := t.TempDir()
+	logsDir := filepath.Join(dataDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	for i := 1; i <= 25; i++ {
+		sb.WriteString(`{"id":"ptc_test_` + string(rune('a'+(i-1))) + `","timestamp":"2026-11-23T00:00:00Z","status":"runtime_error","errorMessage":"boom"}` + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(logsDir, "errors.jsonl"), []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	captureLogs := func(args ...string) string {
+		t.Helper()
+		tmpPath := filepath.Join(t.TempDir(), "stdout.json")
+		f, err := os.Create(tmpPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origStdout := os.Stdout
+		os.Stdout = f
+		defer func() { os.Stdout = origStdout }()
+
+		runLogs(args, true)
+		_ = f.Close()
+		out, err := os.ReadFile(tmpPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+
+	var defaultEntries []map[string]any
+	if err := json.Unmarshal([]byte(captureLogs("--data-dir", dataDir, "--json")), &defaultEntries); err != nil {
+		t.Fatalf("default --json unmarshal failed: %v", err)
+	}
+	if len(defaultEntries) != 20 || defaultEntries[0]["id"] != "ptc_test_f" || defaultEntries[19]["id"] != "ptc_test_y" {
+		t.Fatalf("expected default --tail 20 to return last 20 entries (f..y), got len=%d", len(defaultEntries))
+	}
+
+	var allEntries []map[string]any
+	if err := json.Unmarshal([]byte(captureLogs("--data-dir", dataDir, "--json", "--tail", "0")), &allEntries); err != nil {
+		t.Fatalf("--tail 0 --json unmarshal failed: %v", err)
+	}
+	if len(allEntries) != 25 {
+		t.Fatalf("expected --tail 0 to return all 25 entries, got %d", len(allEntries))
+	}
+
+	var byID []map[string]any
+	if err := json.Unmarshal([]byte(captureLogs("--data-dir", dataDir, "--json", "--id", "test_c")), &byID); err != nil {
+		t.Fatalf("--id --json unmarshal failed: %v", err)
+	}
+	if len(byID) != 1 || byID[0]["id"] != "ptc_test_c" {
+		t.Fatalf("expected --id test_c to return [ptc_test_c], got %+v", byID)
+	}
+}

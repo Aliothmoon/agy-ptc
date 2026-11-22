@@ -61,8 +61,9 @@ const hits = await tools.search("semantic search");
 if (hits.length > 0) {
   const schema = await tools.describe(hits[0].ref);
   // First-class proxy syntax (hyphens mapped to underscores automatically):
+  // Returns `{ text, data? }` where `res.data` holds auto-parsed JSON or `structuredContent` when the tool outputs JSON.
   const res = await mcp.zvec_grep.zvec_grep_search({ query: "authentication middleware" });
-  return { ref: schema.ref, preview: res.text.slice(0, 600) };
+  return { ref: schema.ref, data: res.data ?? res.text.slice(0, 600) };
 }
 ```
 

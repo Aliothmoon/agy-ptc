@@ -264,8 +264,14 @@ func runLogs(args []string, forceErrors bool) {
 		fmt.Fprintf(os.Stderr, "logs error: %v\n", err)
 		os.Exit(1)
 	}
+	if *runID != "" && len(audit.FilterEntries(entries, 0, *runID)) == 0 && !wantErrors {
+		if errEntries, errFiles, err2 := audit.LoadEntries(*dataDir, true); err2 == nil && len(audit.FilterEntries(errEntries, 0, *runID)) > 0 {
+			entries, files = errEntries, errFiles
+		}
+	}
 	if *asJSON {
-		raw, _ := json.MarshalIndent(entries, "", "  ")
+		filtered := audit.FilterEntries(entries, *tail, *runID)
+		raw, _ := json.MarshalIndent(filtered, "", "  ")
 		fmt.Println(string(raw))
 		return
 	}
