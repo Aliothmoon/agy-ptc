@@ -3,11 +3,11 @@
   "name": "agy-ptc",
   "displayName": "PTC Code Mode",
   "version": "0.6.0",
-  "description": "Programmatic Tool Calling (Code Mode) runtime for Antigravity CLI: compose search, AST outlines, multi-file transactional edits with auto-rollback, fast checks, and external MCP calls in one TypeScript turn.",
+  "description": "Programmatic Tool Calling (Code Mode) runtime for Antigravity CLI: compose search, AST outlines, low-token multi-file atomic edits, fast checks, and external MCP calls in one TypeScript turn.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Audit all Go handlers in this repo, outline missing error checks, and summarize findings in one PTC run",
-    "Refactor symbol usages across files inside a PTC transaction and auto-rollback if go test fails",
+    "Refactor symbol usages across files in one atomic edit.apply batch and verify with sh.checks",
     "Search across the codebase, correlate symbol definitions, and run build + test checks concurrently"
   ],
   "author": {
