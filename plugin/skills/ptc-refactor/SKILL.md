@@ -21,7 +21,8 @@ Follow this 2-turn protocol (plus a small fix turn if checks fail) when refactor
 2. **Turn 2 — Low-Token Edit + Fast Checks (`mcp_agy-ptc_vm_exec`)**:
    - Load `state.get("refactorTargets")`, pass multiline replacement code via `payloads` (`P.*`), and pick the lowest-token hunk per target:
      - **Whole symbol rewrite**: `{ symbol: "Type::method", replaceSymbol: true, replacement: P.newFn }` (0 `target` tokens).
-     - **10–120 line block**: `{ symbol, target: "<start line>", endTarget: "<end line>", replacement: P.newBlock }`.
+     - **Add new function/method**: `{ symbol: "NeighborOrClass", insert: "after" | "before" | "inside", replacement: P.newFn }` or `{ path, append: P.newFn }` (0 `target` tokens).
+     - **Interior block**: `{ symbol?, target: "<start line>", endTarget: "<end line>", replacement: P.newBlock }`.
      - **Small 1–5 line tweak**: `{ symbol, target, replacement }`.
    - Pass all files (including any new files via `{ path, create: P.newFile, overwrite: true }`) to one `await edit.apply({ edits: [...] })` so every hunk across all files is validated before any write (one bad hunk writes nothing; `bestEffort: true` writes the files that match and lists the rest in `failures`), then run fast `<15s` compile/scoped-test checks via `await sh.checks([...])`.
    - **If checks fail, keep the edits**: they are on disk, so return `check.failures` and send only the fixing hunks next turn — never resend the whole payload. Open `tx.begin()` (`t.edit` -> `t.verify` -> `t.commit()` / `t.rollback()`) only when a failed check must leave the tree untouched.

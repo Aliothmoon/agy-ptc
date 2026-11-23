@@ -29,7 +29,9 @@ Always prefer **low-token edit modes** instead of copying 20–50 lines of old c
 
 - **Whole function / method / struct rewrite (`0` `target` tokens — recommended)**:
   `await edit.replaceSymbol(path, "Type::method", P.newMethod)` (or `{ symbol: "Type::method", replaceSymbol: true, replacement: P.newMethod }` inside `edit.apply`). Automatically preserves attached doc comments, `@decorator` / `#[attr]`, and `template<...>` headers unless `P.newMethod` includes them.
-- **10–120 line interior block rewrite (`target` + `endTarget` — saves 85%+ `target` tokens)**:
+- **Add a new function, method, or prototype (`0` `target` tokens — no copying neighbor functions!)**:
+  `await edit.insertSymbol(path, "Type::fn", "after" | "before" | "inside", P.newFn)` (or `{ symbol, insert: "after" | "before" | "inside", replacement: P.newFn }` inside `edit.apply`; `"inside"` appends a member at the end of a `class` / `struct` / `impl` / `namespace` with automatic member indentation; `"before"` inserts above any attached doc comments/attributes). To append at EOF without reading the file tail first, use `await edit.append(path, P.newFn)` or `{ path, append: P.newFn }`.
+- **Interior block rewrite (`target` + `endTarget` — saves 85%+ `target` tokens)**:
   `{ symbol: "Handle", target: "// phase 2: validate", endTarget: "return nil\n\t}", replacement: P.newBlock }` replaces the closed span `[target .. endTarget]` without echoing middle lines (include the preceding statement in `endTarget` rather than a bare `"}"`).
 - **1–5 line surgical tweak**:
   `{ symbol: "Handle", target: "timeout := 5", replacement: "timeout := 15" }`.
@@ -41,6 +43,7 @@ await edit.apply({
       path: "internal/service/handler.go",
       hunks: [
         { symbol: "Handler.ServeHTTP", replaceSymbol: true, replacement: P.newServeHTTP },
+        { symbol: "Handler.validate", insert: "after", replacement: P.newHelperMethod },
         { symbol: "Handler.validate", target: "// check headers", endTarget: "return ok", replacement: P.newHeaderCheck },
       ],
     },
