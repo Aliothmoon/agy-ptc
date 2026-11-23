@@ -230,12 +230,13 @@ To prevent accidental long tasks (`npm run dev`, full E2E suites, infinite loops
 Antigravity CLI's default `"verbosity": "medium"` collapses MCP calls in the chat TUI to a compact summary line. To inspect full TypeScript inputs, traces, and outputs in real time:
 
 - Press **`Ctrl+O`** inside `agy` (or set `"verbosity": "high"` in `~/.gemini/antigravity-cli/settings.json`), **or**
-- Run **`agy-ptc logs -f`** in a side terminal pane!
+- Run **`agy-ptc logs`** in a side terminal pane to open the interactive live TUI console!
 
 ```bash
-agy-ptc logs -f                        # Live-tail incoming PTC TypeScript code, host ops, and return output
-agy-ptc logs --full --tail 10          # Inspect recent executions in full
-agy-ptc errors                         # Show only failed runs and caught capability errors
+agy-ptc logs                           # Open interactive live TUI console (diffs, sessions, tabs, modal inspect)
+agy-ptc errors                         # Open interactive TUI filtered directly to Errors
+agy-ptc logs --plain -f                # Plain CLI live-tail (auto-selected when piped or --json/--full/--id)
+agy-ptc logs --full --tail 10          # Inspect recent executions in plain CLI full mode
 agy-ptc logs --id <ptc_id>             # Inspect full source & trace for a specific run ID
 agy-ptc stats                          # Aggregate error categories & capability hotspots
 agy-ptc bench --recent 15              # Measure tool-per-turn & output.txt spill metrics from local transcripts

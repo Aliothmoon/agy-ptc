@@ -23,18 +23,26 @@ description: >-
 - **Timeouts & Process-Tree Protection**: `mcp_agy-ptc_vm_exec` enforces a **`20s` default deadline** (`timeoutMs: 20000`, configurable `500..120000`) and automatically terminates entire child process trees + closes inherited pipes on timeout so runaway commands never hang.
 - **Fast Checks vs. Long Background Tasks**: Run `<15s` checks (`go vet`, `tsc --noEmit`, lint, package-scoped unit tests) inside `sh.checks` / `tx.verify`. For `>15s` full test suites, heavy builds, or `IsDaemon: true` servers, hand off to native `run_command(WaitMsBeforeAsync: 500..2000)` + `manage_task` so `/tasks` streams live logs and wakes the session automatically.
 
-## 2. Transactional Refactoring (`tx`)
+## 2. Low-Token Transactional Refactoring (`tx` & `edit`)
 
-Uncommitted transactions **automatically roll back** if your script throws an exception or times out.
+Uncommitted transactions **automatically roll back** if your script throws an exception or times out. Always prefer **low-token edit modes** instead of copying 20–50 lines of old code into `target`:
+
+- **Whole function / method / struct rewrite (`0` `target` tokens — recommended)**:
+  `await t.replaceSymbol(path, "Type::method", P.newMethod)` (or `{ symbol: "Type::method", replaceSymbol: true, replacement: P.newMethod }` inside `t.edit`). Automatically preserves attached doc comments, `@decorator` / `#[attr]`, and `template<...>` headers unless `P.newMethod` includes them.
+- **10–120 line interior block rewrite (`target` + `endTarget` — saves 85%+ `target` tokens)**:
+  `{ symbol: "Handle", target: "// phase 2: validate", endTarget: "return nil\n\t}", replacement: P.newBlock }` replaces the closed span `[target .. endTarget]` without echoing middle lines (include the preceding statement in `endTarget` rather than a bare `"}"`).
+- **1–5 line surgical tweak**:
+  `{ symbol: "Handle", target: "timeout := 5", replacement: "timeout := 15" }`.
 
 ```ts
 const t = await tx.begin();
-await t.edit("internal/service/handler.go", [
+await t.edit([
   {
-    startLine: 40,
-    endLine: 75,
-    target: P.before,
-    replacement: P.after,
+    path: "internal/service/handler.go",
+    hunks: [
+      { symbol: "Handler.ServeHTTP", replaceSymbol: true, replacement: P.newServeHTTP },
+      { symbol: "Handler.validate", target: "// check headers", endTarget: "return ok", replacement: P.newHeaderCheck },
+    ],
   },
 ]);
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -12,6 +13,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aliothmoon/mcplex/pkg/audit"
+	"github.com/aliothmoon/mcplex/pkg/events"
+	"github.com/aliothmoon/mcplex/pkg/sandbox"
+	"github.com/aliothmoon/mcplex/pkg/tui"
 )
 
 func TestPTCAgentManifestUsesOnlyRegisteredStaticTools(t *testing.T) {
@@ -143,20 +149,131 @@ func TestComputeLiveTailStartBounds(t *testing.T) {
 	}
 }
 
-func TestAgyPTCBinaryDoesNotDependOnTUI(t *testing.T) {
-	out, err := exec.Command("go", "list", "-deps", ".").Output()
-	if err != nil {
-		t.Skipf("go list unavailable: %v", err)
-	}
-	deps := string(out)
-	for _, forbidden := range []string{
-		"github.com/aliothmoon/mcplex/pkg/tui",
-		"github.com/charmbracelet/bubbletea",
-		"github.com/charmbracelet/lipgloss",
-	} {
-		if strings.Contains(deps, forbidden) {
-			t.Fatalf("cmd/agy-ptc must remain headless/zero-TUI, but depends on %s", forbidden)
+func TestAuditLogSourceReplaysExecutionsAndLiveEventsIntoTUI(t *testing.T) {
+	tmp := t.TempDir()
+	logger := audit.NewLogger(tmp)
+
+	// 1. Historical run recorded only in executions.jsonl (simulates pre-existing history).
+	logger.Record(audit.Entry{
+		ID:            "ptc_20261123_050001_001",
+		Timestamp:     "2026-11-23T05:00:01+08:00",
+		Cwd:           "F:/Project/Golang/VM02",
+		Title:         "Historical edit failure",
+		Status:        "runtime_error",
+		ErrorCategory: "edit_hunk_mismatch",
+		ErrorMessage:  "NoMatch: target not found in a.go",
+		DurationMs:    18,
+		HostOps:       1,
+		FailedOps:     1,
+		Traces: []sandbox.OpTrace{
+			{Seq: 1, Wave: 1, Capability: "edit.replace", Target: "a.go", DurationMs: 5, Status: "error", Kind: "NoMatch", Error: "target not found"},
+		},
+		Code:          `await edit.replace("a.go", "old", "new");`,
+		ResultPreview: "[ptc runtime error]\nNoMatch: target not found in a.go",
+	})
+
+	// 2. Rich run recorded in BOTH events.jsonl and executions.jsonl (must deduplicate to 1 run).
+	richID := "ptc_20261123_050002_a1b2_001"
+	logger.RecordEvent(events.Event{
+		Kind:       events.KindExecStart,
+		Timestamp:  "2026-11-23T05:00:02+08:00",
+		RunID:      richID,
+		Tool:       "exec",
+		Cwd:        "F:/Project/Golang/AgyPTC",
+		Title:      "Rich live update",
+		Status:     "running",
+		Detail:     `await fs.write("hello.txt", "hi");`,
+		DetailKind: "code",
+	})
+	logger.RecordEvent(events.Event{
+		Kind:      events.KindFileCreate,
+		Timestamp: "2026-11-23T05:00:02+08:00",
+		RunID:     richID,
+		Tool:      "fs.write",
+		Cwd:       "F:/Project/Golang/AgyPTC",
+		Path:      "hello.txt",
+		Status:    "ok",
+	})
+	logger.RecordEvent(events.Event{
+		Kind:       events.KindExecEnd,
+		Timestamp:  "2026-11-23T05:00:02+08:00",
+		RunID:      richID,
+		Tool:       "exec",
+		Cwd:        "F:/Project/Golang/AgyPTC",
+		Title:      "Rich live update",
+		Status:     "ok",
+		DurationMs: 12,
+		HostOps:    1,
+		Detail:     "[ptc ok | 1 host ops | 12ms]",
+		DetailKind: "text",
+	})
+	logger.Record(audit.Entry{
+		ID:         richID,
+		Timestamp:  "2026-11-23T05:00:02+08:00",
+		Cwd:        "F:/Project/Golang/AgyPTC",
+		Title:      "Rich live update",
+		Status:     "ok",
+		DurationMs: 12,
+		HostOps:    1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	src := tui.NewAuditLogSource(ctx, tmp, 50)
+	defer src.Close()
+
+	m := tui.NewModel(tui.Config{
+		BrandName:     "AgyPTC",
+		Endpoint:      tmp,
+		Version:       "0.6.0",
+		ModeLabel:     "logs",
+		ShowErrorsTab: true,
+	}, src)
+
+	drainMessages := func(expectSubstr string, deadline time.Duration) string {
+		timeout := time.After(deadline)
+		for {
+			select {
+			case msg := <-src.Messages():
+				m.Update(msg)
+				view := m.View()
+				if strings.Contains(view, expectSubstr) {
+					return view
+				}
+			case <-timeout:
+				return m.View()
+			}
 		}
+	}
+
+	view := drainMessages("Rich live update", 2*time.Second)
+	if !strings.Contains(view, "AgyPTC") {
+		t.Fatalf("expected AgyPTC brand in TUI header, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Historical edit failure") || !strings.Contains(view, "Rich live update") {
+		t.Fatalf("expected both historical and rich runs in TUI feed, got:\n%s", view)
+	}
+	if !strings.Contains(view, "2 runs") {
+		t.Fatalf("expected deduplicated '2 runs' counter in header, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Sess:All(2)") {
+		t.Fatalf("expected 2 workspace sessions (VM02 + AgyPTC), got:\n%s", view)
+	}
+
+	// 3. Stream a brand-new live event after startup and verify 120ms tail picks it up.
+	logger.RecordEvent(events.Event{
+		Kind:      events.KindExecStart,
+		Timestamp: time.Now().Format(time.RFC3339),
+		RunID:     "ptc_live_stream_003",
+		Tool:      "exec",
+		Cwd:       "F:/Project/Golang/AgyPTC",
+		Title:     "Streamed live run",
+		Status:    "running",
+	})
+	liveView := drainMessages("Streamed live run", 2*time.Second)
+	if !strings.Contains(liveView, "Streamed live run") {
+		t.Fatalf("expected newly appended live event in TUI feed, got:\n%s", liveView)
 	}
 }
 

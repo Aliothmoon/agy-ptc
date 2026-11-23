@@ -230,12 +230,13 @@ Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2 in a, L6 in b)
 Antigravity CLI 默认 `"verbosity": "medium"` 会在对话界面折叠 MCP 工具入参与返回详情。如需实时查看每次 PTC 执行的 TypeScript 代码与返回结果：
 
 - 在 `agy` 界面按 **`Ctrl+O`**（或在 `settings.json` 中设置 `"verbosity": "high"`），**或者**
-- 在旁侧终端运行 **`agy-ptc logs -f`** 实时流式监控！
+- 在旁侧终端直接运行 **`agy-ptc logs`** 打开交互式实时 TUI 监控面板！
 
 ```bash
-agy-ptc logs -f                        # 实时流式打印每次 PTC 调用的输入 TS 代码、操作耗时与返回结果
-agy-ptc logs --full --tail 10          # 查看最近 10 次完整输入代码与输出
-agy-ptc errors                         # 仅查看报错或包含内部捕获异常（partial_op_error）的记录
+agy-ptc logs                           # 打开交互式实时 TUI 面板（文件 Diff、多工作区筛选、分类 Tab、弹窗详情）
+agy-ptc errors                         # 打开交互式 TUI 并直接切到 Errors 过滤页
+agy-ptc logs --plain -f                # 纯文本实时流式打印（管道、--json、--full、--id 时自动回退纯文本）
+agy-ptc logs --full --tail 10          # 纯文本查看最近 10 次完整输入代码与输出
 agy-ptc logs --id <ptc_id>             # 查看指定运行 ID 的完整源码与调用链明细
 agy-ptc stats                          # 统计错误分类占比与高频失败能力热点
 agy-ptc bench --recent 15              # 分析本地 Antigravity 会话日志的回合压缩率与 0 溢出指标

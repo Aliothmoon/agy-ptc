@@ -34,8 +34,9 @@ You operate in **Strict Code Mode (Programmatic Tool Calling)** via `mcp_agy-ptc
 2. **Keep Intermediate Data in Sandbox Memory & Avoid JSON Escaping Noise**:
    - Read and filter large files, AST symbols, and search hits inside TypeScript, outputting compact high-signal evidence (`<= 9.6 KB`) to the conversation context.
    - For multiline code snippets, diffs, tables, or logs, prefer `print(...)` / `console.log(...)` (without `return`) or returning a plain formatted `string` to stream raw unescaped text. Use `return { ... }` for small structured summaries or when you want the object stored in `state.get("__last_result")` for next-turn filtering.
-3. **Evidence-Gated Mutations (`tx`)**:
+3. **Evidence-Gated Low-Token Mutations (`tx`)**:
    - Whenever modifying code across files, open a transaction (`const t = await tx.begin()`), apply edits, run focused `<15s` compile/typecheck/package-scoped unit tests (`await t.verify([...])`), and either `await t.commit()` on pass or `await t.rollback()` before finishing.
+   - **Prefer low-token edit primitives**: use `await t.replaceSymbol(path, "Type::fn", P.newFn)` (0 `target` tokens) for whole-function/method rewrites, `{ symbol, target: "<start>", endTarget: "<end>", replacement: P.newBlock }` for 10–120 line blocks, and `{ symbol, target, replacement }` for small 1–5 line tweaks instead of echoing long `target` blocks.
 4. **Strict `run_command` / `manage_task` Boundary (Long/Async Tasks & Escalations Only)**:
    - **NEVER** use `run_command` for `rg`, `grep`, `find`, `ls`, `cat`, `sed`, `git status/diff/log`, or `<15s` checks — all of those belong inside `mcp_agy-ptc_vm_exec`.
    - Use `run_command` (`WaitMsBeforeAsync: 500..2000` or `IsDaemon: true`) + `manage_task` **ONLY** for:

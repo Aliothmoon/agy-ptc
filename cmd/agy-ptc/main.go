@@ -26,6 +26,7 @@ import (
 	"github.com/aliothmoon/mcplex/pkg/audit"
 	"github.com/aliothmoon/mcplex/pkg/mcpserver"
 	ptcruntime "github.com/aliothmoon/mcplex/pkg/runtime"
+	"github.com/aliothmoon/mcplex/pkg/tui"
 )
 
 const pluginName = "agy-ptc"
@@ -47,7 +48,7 @@ func main() {
 		runStatusLine(args)
 	case "run":
 		runStandalone(args)
-	case "logs":
+	case "logs", "ui":
 		runLogs(args, false)
 	case "errors":
 		runLogs(args, true)
@@ -92,8 +93,9 @@ Commands:
   hook session-start                     Run the fast SessionStart workspace snapshot hook
   statusline [--data-dir <dir>]          Render live PTC TUI status line for Antigravity CLI
   run [--cwd <dir>] [--code <ts> | file] Execute a TypeScript PTC program directly from CLI
-  logs [-f] [-e] [--full] [--id <id>]    Inspect or live-tail (-f) PTC input code & return output
-  errors [--tail <N>] [--id <ptc_id>]    Shortcut for 'logs --errors' (errors & caught op failures)
+  logs [-e] [--plain] [--id <id>]        Open interactive TUI log viewer (or plain CLI with --plain/--json)
+  ui [--data-dir <dir>]                  Alias for 'logs' (interactive live TUI console)
+  errors [--plain] [--id <ptc_id>]       Open TUI on Errors tab (or plain CLI with --plain/--json)
   stats                                  Summarize PTC error categories & failing capability hotspots
   bench [--recent <N> | <file>]          Analyze local Antigravity transcript.jsonl efficiency
   install [--project <dir>]              Install & validate plugin into Antigravity CLI
@@ -217,15 +219,18 @@ func runLogs(args []string, forceErrors bool) {
 	fs := flag.NewFlagSet("logs", flag.ExitOnError)
 	errorsOnly := fs.Bool("errors", forceErrors, "Show only runs with uncaught or caught capability errors")
 	shortErr := fs.Bool("e", forceErrors, "Alias for --errors")
-	follow := fs.Bool("f", false, "Live-stream incoming MCP PTC calls (input code, ops, and return output)")
+	follow := fs.Bool("f", false, "Live-stream incoming MCP PTC calls")
 	followLong := fs.Bool("follow", false, "Alias for -f")
+	plain := fs.Bool("plain", false, "Print plain CLI text instead of launching the interactive TUI")
+	noUI := fs.Bool("no-ui", false, "Alias for --plain")
+	uiFlag := fs.Bool("ui", false, "Force interactive TUI console")
 	full := fs.Bool("full", false, "Print input TypeScript code and return output for each entry")
 	tail := fs.Int("tail", 20, "Number of recent entries to display")
 	runID := fs.String("id", "", "Inspect full TypeScript source and trace for a specific run ID")
 	dataDir := fs.String("data-dir", "", "Explicit plugin data directory")
 	asJSON := fs.Bool("json", false, "Output raw JSON array")
 	compact := fs.Bool("compact", false, "Omit full source/result bodies in JSON output")
-	clearLogs := fs.Bool("clear", false, "Delete recorded execution/error JSONL logs")
+	clearLogs := fs.Bool("clear", false, "Delete recorded execution/error/event JSONL logs")
 	_ = fs.Parse(args)
 
 	if *runID == "" && fs.NArg() > 0 {
@@ -234,8 +239,13 @@ func runLogs(args []string, forceErrors bool) {
 	if *clearLogs {
 		dirs := audit.DiscoverLogDirs(*dataDir)
 		for _, d := range dirs {
-			_ = os.Remove(filepath.Join(d, "executions.jsonl"))
-			_ = os.Remove(filepath.Join(d, "errors.jsonl"))
+			for _, name := range []string{
+				"executions.jsonl", "executions.jsonl.1",
+				"errors.jsonl", "errors.jsonl.1",
+				"events.jsonl", "events.jsonl.1",
+			} {
+				_ = os.Remove(filepath.Join(d, name))
+			}
 		}
 		fmt.Printf("Cleared PTC logs across %d directory(s).\n", len(dirs))
 		return
@@ -249,6 +259,31 @@ func runLogs(args []string, forceErrors bool) {
 	})
 
 	wantErrors := *errorsOnly || *shortErr
+	usePlain := *plain || *noUI || *asJSON || *compact || *full || *runID != ""
+	if !usePlain && (*uiFlag || tui.IsInteractiveTerminal()) {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		uiTail := 150
+		if tailSet && *tail > 0 {
+			uiTail = *tail
+		}
+		src := tui.NewAuditLogSource(ctx, *dataDir, uiTail)
+		cfg := tui.Config{
+			BrandName:         "AgyPTC",
+			Endpoint:          describeLogEndpoint(*dataDir),
+			Version:           version.Version,
+			ModeLabel:         "logs",
+			ShowErrorsTab:     true,
+			InitialErrorsOnly: wantErrors,
+		}
+		if err := tui.Run(ctx, cfg, src); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "logs ui error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if *follow || *followLong {
 		liveTail := 5
 		if tailSet {
@@ -289,6 +324,33 @@ func runLogs(args []string, forceErrors bool) {
 		return
 	}
 	fmt.Print(audit.FormatLogs(entries, files, *tail, *runID))
+}
+
+func describeLogEndpoint(explicitDataDir string) string {
+	shorten := func(p string) string {
+		slashed := filepath.ToSlash(filepath.Clean(p))
+		if home := filepath.ToSlash(filepath.Clean(userHomeDir())); home != "" && home != "." {
+			if strings.EqualFold(slashed, home) {
+				return "~"
+			}
+			if len(slashed) > len(home)+1 && strings.EqualFold(slashed[:len(home)], home) && slashed[len(home)] == '/' {
+				return "~" + slashed[len(home):]
+			}
+		}
+		return slashed
+	}
+	dirs := audit.DiscoverLogDirs(explicitDataDir)
+	if len(dirs) > 0 {
+		lbl := shorten(dirs[0])
+		if len(dirs) > 1 {
+			lbl = fmt.Sprintf("%s (+%d)", lbl, len(dirs)-1)
+		}
+		return lbl
+	}
+	if strings.TrimSpace(explicitDataDir) != "" {
+		return shorten(filepath.Join(explicitDataDir, "logs"))
+	}
+	return shorten(filepath.Join(defaultCacheDataDir(), "logs"))
 }
 
 func computeLiveTailStart(totalEntries, initialTail int) int {

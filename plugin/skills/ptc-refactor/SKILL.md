@@ -18,6 +18,10 @@ Follow this 2-turn maximum protocol when refactoring symbols, signatures, or pat
    - Run `search.rg` + `ast.outlines` / `ast.enclosingSymbol` in one script.
    - Read exact symbol windows (`fs.read(file, { startLine, endLine })`) in sandbox memory.
    - Persist the planned target list via `state.set("refactorTargets", targets)` and output a concise impact summary (`file`, `symbol`, `startLine..endLine`, `snippet`) via `print(...)` (preferred for readable multiline snippets) or `return`.
-2. **Turn 2 — Atomic Edit + Verify + Commit (`mcp_agy-ptc_vm_exec`)**:
-   - Load `state.get("refactorTargets")`, pass multiline code blocks via `payloads` (`P.*`), open `const t = await tx.begin()`, apply all edits, and run fast `<15s` compile/scoped-test checks via `await t.verify([...])`.
+2. **Turn 2 — Low-Token Atomic Edit + Verify + Commit (`mcp_agy-ptc_vm_exec`)**:
+   - Load `state.get("refactorTargets")`, pass multiline replacement code via `payloads` (`P.*`), open `const t = await tx.begin()`, and pick the lowest-token primitive per target:
+     - **Whole symbol rewrite**: `await t.replaceSymbol(path, "Type::method", P.newFn)` (or `{ symbol, replaceSymbol: true, replacement: P.newFn }` — 0 `target` tokens).
+     - **10–120 line block**: `{ symbol, target: "<start line>", endTarget: "<end line>", replacement: P.newBlock }`.
+     - **Small 1–5 line tweak**: `{ symbol, target, replacement }`.
+   - Pass all files to one `await t.edit([...])` so every hunk across all files is validated upfront, then run fast `<15s` compile/scoped-test checks via `await t.verify([...])`.
    - Commit only when fast checks pass; otherwise roll back and inspect `check.failures` to fix. If a heavy `>15s` full integration/E2E suite is also required after commit, launch it via native `run_command(WaitMsBeforeAsync: 500..2000)` so `/tasks` tracks live output in the background.
