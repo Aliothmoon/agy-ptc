@@ -1,7 +1,7 @@
 github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/aliothmoon/mcplex v0.7.2-0.20261123235149-c7e48ca1bd40 h1:UcbaX1mGTpgN0vm2Cd+CCsv1FKh9ajp39agEDKvTExo=
-github.com/aliothmoon/mcplex v0.7.2-0.20261123235149-c7e48ca1bd40/go.mod h1:Tw4Hioo+X1pZy/AjM8xbArhGi4VbOGj+azgmm/05jOc=
+github.com/aliothmoon/mcplex v0.8.0 h1:rY1hc7JFuGyfy96p9ujKnszgfPvEJSEZuZ6gpeeX598=
+github.com/aliothmoon/mcplex v0.8.0/go.mod h1:eRzWvN0PAETPuC2+5iEOyCeQWJs0q+sX6bsHdPYzxIM=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/charmbracelet/bubbletea v1.3.10 h1:otUDHWMMzQSB0Pkc87rm691KZ3SWa4KUlvF9nRvCICw=
