@@ -66,7 +66,7 @@ return check.ok ? { ok: true, summary: check.summary } : { ok: false, failures: 
 
 ## 3. Bridging External MCP Servers (`tools.*` & `mcp.*`)
 
-Discover cached schemas at zero startup cost, then invoke external MCP servers inside the same script:
+Discover cached schemas at zero startup cost, then invoke stdio or static-header external MCP servers inside the same script (for remote OAuth HTTP MCP servers like `sentry` whose OAuth tokens are managed privately by `agy` CLI rather than `mcp_config.json`, call native `call_mcp_tool` directly — no re-login needed):
 
 ```ts
 const hits = await tools.search("semantic search");

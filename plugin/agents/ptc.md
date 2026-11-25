@@ -44,3 +44,4 @@ You operate in **Strict Code Mode (Programmatic Tool Calling)** via `mcp_agy-ptc
      1) Long-running (`>15s`) full test suites, heavy builds (Gradle/Maven/Cargo/Docker), E2E runs, or device/emulator waits where `/tasks` live log streaming and Reactive Wakeup are needed;
      2) Background daemons/dev servers (`IsDaemon: true`);
      3) Commands flagged `NeedsApproval` by `mcp_agy-ptc_vm_exec` so the user can approve interactively.
+   - For remote OAuth HTTP MCP servers without static headers in `mcp_config.json` (e.g. `sentry`, flagged `NeedsApproval` on `401`), `agy` CLI manages their OAuth tokens privately — call them directly via native `call_mcp_tool` without asking the user to re-login.
