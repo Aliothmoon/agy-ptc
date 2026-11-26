@@ -584,14 +584,14 @@ func runUninstall(args []string) error {
 				fmt.Printf("Removed CLI binary %s\n", pathBin)
 			}
 		}
-		h := userHomeDir()
-		for _, d := range []string{
-			filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", pluginName),
-			filepath.Join(h, ".gemini", "antigravity", "plugin_data", pluginName),
-		} {
-			if err := os.RemoveAll(d); err == nil {
-				fmt.Printf("Removed plugin data %s\n", d)
+		for _, d := range dataDirCandidates(userHomeDir()) {
+			if _, err := os.Stat(d); os.IsNotExist(err) {
+				continue
 			}
+			if err := os.RemoveAll(d); err != nil {
+				return fmt.Errorf("removing plugin data %s: %w", d, err)
+			}
+			fmt.Printf("Removed plugin data %s\n", d)
 		}
 	}
 	return nil
@@ -1000,16 +1000,22 @@ func writeExecutableSafe(dstPath string, data []byte) error {
 	return nil
 }
 
+// dataDirCandidates lists every location agy-ptc may keep logs/state; the last is the fallback cache.
+func dataDirCandidates(home string) []string {
+	return []string{
+		filepath.Join(home, ".gemini", "antigravity-cli", "plugin_data", pluginName),
+		filepath.Join(home, ".gemini", "antigravity", "plugin_data", pluginName),
+		filepath.Join(home, ".gemini", "config", "plugin_data", pluginName),
+		filepath.Join(home, ".gemini", "cache", pluginName),
+	}
+}
+
 func defaultCacheDataDir() string {
 	if pd := strings.TrimSpace(os.Getenv("PLUGIN_DATA")); pd != "" {
 		return pd
 	}
-	h := userHomeDir()
-	candidates := []string{
-		filepath.Join(h, ".gemini", "antigravity-cli", "plugin_data", pluginName),
-		filepath.Join(h, ".gemini", "antigravity", "plugin_data", pluginName),
-		filepath.Join(h, ".gemini", "config", "plugin_data", pluginName),
-	}
+	all := dataDirCandidates(userHomeDir())
+	candidates, fallback := all[:len(all)-1], all[len(all)-1]
 	for _, dir := range candidates {
 		if fi, err := os.Stat(filepath.Join(dir, "logs")); err == nil && fi.IsDir() {
 			return dir
@@ -1020,7 +1026,7 @@ func defaultCacheDataDir() string {
 			return dir
 		}
 	}
-	return filepath.Join(h, ".gemini", "cache", pluginName)
+	return fallback
 }
 
 func userHomeDir() string {
