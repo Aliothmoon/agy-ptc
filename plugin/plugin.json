@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "agy-ptc",
   "displayName": "AgyPTC",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "Programmatic Tool Calling runtime: compose search, AST outlines, atomic multi-file edits, fast checks, and MCP calls in one TypeScript turn.",
   "logo": "assets/logo.png",
   "suggestedPrompts": [
