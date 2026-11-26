@@ -1,31 +1,45 @@
-# AgyPTC (`agy-ptc`)
+<p align="center">
+  <img src="./plugin/assets/logo.png" width="112" alt="AgyPTC Logo" />
+</p>
 
-[English](./README.md) | **简体中文**
+<h1 align="center">AgyPTC (<code>agy-ptc</code>)</h1>
 
-**面向 Google Antigravity CLI (`agy`) 的编程式工具调用（Code Mode / PTC）运行时与插件**
+<p align="center">
+  <strong>面向 Google Antigravity 的编程式工具调用（Code Mode / PTC）运行时与插件</strong><br/>
+  <em>将多步代码搜索、Tree-sitter/Go AST 分析、低 Token 跨文件原子修改、快速校验与外部 MCP 编排收敛至单轮 TypeScript 执行。</em>
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Go](https://img.shields.io/badge/Go-纯静态单文件%20(CGO__ENABLED%3D0)-00ADD8?logo=go)](./go.mod)
-[![Antigravity CLI](https://img.shields.io/badge/适配宿主-Antigravity%20CLI%20(agy)-8E75B2)](./plugin/plugin.json)
+<p align="center">
+  <a href="./README.md">English</a> · <strong>简体中文</strong>
+</p>
 
-`AgyPTC` 受 Cloudflare Code Mode、Anthropic Programmatic Tool Calling 以及 [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 启发，为 **Antigravity CLI (`agy`)** 提供原生的 **Code Mode（编程式工具调用）** 能力。
-
-> **基于共享核心 [`MCPlex`](https://github.com/Aliothmoon/mcplex) 构建：** 客户端无关的 Code Mode 沙箱、TypeScript 编译器、AST/事务编辑能力与 MCP 代理核心统一维护在 [`github.com/aliothmoon/mcplex`](https://github.com/Aliothmoon/mcplex)（`pkg/...`）。若需在 Claude Desktop、Cursor、Windsurf、Cline 等任意通用 MCP 客户端中使用，可直接使用 `MCPlex`；`AgyPTC` 专注提供 Antigravity CLI 深度原生集成（钩子、状态栏、规则、技能与插件生命周期管理）。
-
-传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test` -> 失败手动回滚），不仅推理延迟高，还会把大量中间文件文本塞进上下文窗口，甚至触发 Antigravity `>10 KB` 的 `output.txt` 磁盘落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_vm_exec` 提交**一段极短的 TypeScript 脚本**，搜索、AST 符号大纲、循环过滤、跨文件原子事务修改（失败自动回滚）与外部 MCP 调用即可在 **1 个回合**内于本地 Go 沙箱内存中完成，仅将 `<= 9.6 KB` 的精简结构化摘要（亦可通过 `maxOutputBytes` 按需放开）返回给模型。
+<p align="center">
+  <a href="https://github.com/Aliothmoon/agy-ptc/releases"><img src="https://img.shields.io/github/v/release/Aliothmoon/agy-ptc?logo=github" alt="Release" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="./go.mod"><img src="https://img.shields.io/badge/Go-纯静态单文件%20(CGO__ENABLED%3D0)-00ADD8?logo=go" alt="Static Go Binary" /></a>
+  <a href="./plugin/plugin.json"><img src="https://img.shields.io/badge/适配终端-Antigravity%20App%20%7C%20CLI%20%7C%20IDE-8E75B2" alt="Antigravity Surfaces" /></a>
+</p>
 
 ---
 
-## 核心特性对比
+`AgyPTC` 受 Anthropic Programmatic Tool Calling、Cloudflare Code Mode 与 [`pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 启发，为 **Google Antigravity 全家桶**（Antigravity 桌面端 App、Antigravity CLI `agy` 与 IDE 扩展）提供原生的 **编程式工具调用（Code Mode / PTC）** 能力。
+
+> **基于共享核心 [`MCPlex`](https://github.com/Aliothmoon/mcplex) 构建：** 客户端无关的 Code Mode 沙箱、TypeScript 编译器、Tree-sitter/Go AST 引擎、原子编辑/事务能力与 MCP 桥接统一维护在 [`github.com/aliothmoon/mcplex`](https://github.com/Aliothmoon/mcplex)（`pkg/...`）。若需接入 Claude Desktop、Cursor、Windsurf、Cline 等通用 MCP 客户端，可直接使用 `MCPlex`；`AgyPTC` 专注提供 Antigravity 深度原生集成（插件包、零依赖二进制自动拉取自举、`SessionStart` 快照钩子、桌面端 Sidecar 监控面板、CLI 状态栏、规则、技能与 `ptc` 专属子智能体）。
+
+传统 Agent 工具调用往往需要串行往返 8～15 个回合（`grep` -> `read_file` -> `read_file` -> `edit_file` -> `go test`），不仅回合延迟高，还会把大量中间文本塞进对话上下文，甚至触发 Antigravity `>10 KB` 的 `output.txt` 落盘惩罚。借助 `AgyPTC`，模型只需向 `mcp_agy-ptc_vm_exec` 提交**一段精简的 TypeScript 脚本**，中间数据、AST 符号、循环过滤与条件分支全部留在本地 Go 沙箱内存中，仅向模型返回 `<= 9.6 KB` 的紧凑结果（超长输出自动驻留内存分页）。
+
+---
+
+## 核心优势对比
 
 | 维度 | 传统串行工具调用 | AgyPTC (`mcp_agy-ptc_vm_exec`) |
 | :--- | :--- | :--- |
-| **搜索 -> 读取 -> 修改 -> 验证链路** | 6～15 次串行 LLM 回合往返 | **1～2 个回合**（分支与循环在 `<5ms` 本地沙箱内完成） |
-| **上下文窗口污染** | 每次 grep 与文件切片原样堆积进历史 | 中间数据留在沙箱内存（单文件 2 MB、单命令 256 KB），仅返回精简 JSON（`<= 9.6 KB`） |
-| **MCP `>10 KB` `output.txt` 落盘惩罚** | 超长输出被迫落盘，额外浪费 1 个读取回合 | **0 落盘溢出** — 超限结果自动存入会话 `state.get("__last_result")` |
-| **多文件重构安全性** | 单测失败时半成品修改残留在磁盘 | **`tx.begin()` 内存快照事务**，单测失败 / 抛错 / 超时自动字节级回滚 |
-| **误跑长任务 / 子进程卡死防护** | 容易拖死回合或残留孤儿进程占住管道 | **默认 `20s` 超时 + 递归强杀进程树**（Windows `taskkill /T /F` / Unix `-pgid` + `WaitDelay`） |
-| **外部运行时依赖** | 需要重型 Python / Deno / Docker 沙箱 | **纯 Go 静态单二进制（`CGO_ENABLED=0`）**，内嵌 `esbuild` + `goja` |
+| **搜索 -> 分析 -> 修改 -> 验证链路** | 6～15 次串行 LLM 回合往返 | **1～2 个回合**（循环与分支在 `<5ms` 本地 TS 沙箱内完成） |
+| **上下文窗口占用** | 每次 grep 与文件切片原样堆积进历史 | 中间数据留在沙箱内存（单文件最高 16 MB，`sh.run` 8 MB），仅返回 `<= 9.6 KB` 摘要 |
+| **MCP `>10 KB` `output.txt` 落盘惩罚** | 超长输出被迫落盘，多花 1 个回合读取 | **0 磁盘溢出** — 超长文本存入 `state.get("__result_N")` 按行分页查看 |
+| **低 Token 跨文件重构** | 每次 `edit_file` 需回显几十行原代码做定位 | **`edit.replaceSymbol` / `edit.insertSymbol`（`0` target token）** + 写前全量校验 & 可选 `tx.begin()` 失败自动回滚 |
+| **子进程防卡死与守护进程兼容** | 容易拖死回合、残留孤儿进程或误杀宿主机 `adb` | **动态放宽超时（`20s`..`120s`）+ 递归清进程树**，同时保留宿主机共享守护进程（`adb`、`sccache`、`mspdbsrv`） |
+| **外部运行时依赖** | 依赖重型 Python / Deno / Docker 沙箱 | **零配置纯静态 Go 单文件（`CGO_ENABLED=0`）**，内嵌 `esbuild` + `goja` + `gotreesitter` |
 
 ---
 
@@ -33,58 +47,73 @@
 
 ```mermaid
 flowchart LR
-    Agent["Antigravity CLI Agent"] -->|"mcp_agy-ptc_vm_exec\n{ cwd, code, payloads?, timeoutMs? }"| Compiler["esbuild TS -> ES2020\n(<1ms 编译 + VLQ 行号映射)"]
-    Compiler --> VM["隔离 goja JS 沙箱\n(异步 Promise 事件循环 + 超时看门狗)"]
-    VM --> FS["fs.* & search.*\n(rg --json 极速搜索 + glob)"]
-    VM --> AST["ast.*\n(go/parser 精确 AST + 多语言符号大纲)"]
-    VM --> TX["edit.* & tx.*\n(内存文件快照 + 失败自动回滚)"]
-    VM --> SH["git.* & sh.*\n(15s 快速校验 + 递归进程树清理)"]
-    VM --> MCP["tools.* & mcp.*\n(零启动开销外部 MCP 桥接)"]
-    VM --> ST["state.*\n(跨回合会话状态存储)"]
+    Agent["Antigravity Agent"] -->|"mcp_agy-ptc_vm_exec\n{ cwd, code, payloads?, timeoutMs? }"| Compiler["esbuild TS -> ES2020\n(<1ms 编译 + VLQ 行号映射)"]
+    Compiler --> VM["隔离 goja JS 沙箱\n(异步事件循环 + 超时看门狗)"]
+    VM --> FS["fs.* & search.*\n(rg --json, glob, .gz, UTF-16)"]
+    VM --> AST["ast.*\n(go/parser + Tree-sitter 10+ 语言)"]
+    VM --> TX["edit.* & tx.*\n(符号级修改 + 快照自动回滚)"]
+    VM --> SH["git.* & sh.*\n(只读 Git + 受控进程树校验)"]
+    VM --> MCP["tools.* & mcp.*\n(全局与插件 MCP 桥接)"]
+    VM --> ST["state.*\n(跨回合状态 + 行级分页)"]
     VM -->|"<= 9,600 B UTF-8\n(零 output.txt 溢出)"| Agent
 ```
 
-### 快慢任务黄金分工（与原生 `/tasks` 及 `rtk` 无缝协同）
+### 快慢任务黄金分工
 
-`AgyPTC` 与 Antigravity CLI 内置后台任务系统互补协作，互不抢占：
+`AgyPTC` 与 Antigravity 原生工具互补协作：
 
-- **交给 `mcp_agy-ptc_vm_exec`（`<15s` 快速同步操作）**：代码搜索（`search.rg`/`glob`）、AST 符号定位（`ast.outline`）、批量读取与过滤、多文件事务重构（`tx.begin`）、只读 Git 查询，以及快速编译/类型检查/单包单测（`go vet ./...`、`tsc --noEmit`、`go test ./pkg/...`）。
-- **交给原生 `run_command` + `manage_task`（`>15s` 长耗时/后台任务）**：全量集成测试/E2E、重型构建（Gradle/Cargo/Docker）、交互式命令，以及 `IsDaemon: true` 常驻开发服务器——完整保留 `/tasks` 实时日志流与后台完成自动唤醒（Reactive Wakeup）。
-- **与 [`rtk`](https://github.com/rtk-ai/rtk) 插件零冲突共存**：`rtk` 仅通过 `PreToolUse` 拦截顶层 `run_command`，不会篡改 `AgyPTC` 内部子进程的结构化 JSON 输出；同时原生后台长任务依然享受 `rtk` 的输出压缩。
+- **原生 `read_file`（并行调用）**：直接读取 1～3 个已知的完整小文件（`<300` 行，单次 46 KB 内联额度，不占用 PTC 的 9.6 KB 输出预算）。
+- **`mcp_agy-ptc_vm_exec`（`<15s` 多步编排与快速校验）**：代码搜索（`search.rg`/`glob`）、AST 符号定位与按符号读取（`ast.outline`/`ast.read`）、多文件原子编辑（`edit.apply` + `sh.checks`）、只读 `git.*`（含历史提交 `git.query("grep ...")`）及快速编译/类型检查/单包单测。
+- **原生 `run_command` + `manage_task`（`>15s` 长耗时与常驻服务）**：全量集成测试/E2E、重型构建（Gradle/Cargo/Docker）、交互式命令及 `IsDaemon: true` 常驻服务——完整保留 `/tasks` 实时日志流与完成自动唤醒（Reactive Wakeup）。
+- **与 [`rtk`](https://github.com/rtk-ai/rtk) 零冲突共存**：`rtk` 仅拦截顶层 `run_command`，不会篡改 `AgyPTC` 内部子进程的结构化标准输出。
 
 ---
 
-## 快速开始
+## 快速安装
 
-### 环境要求
+### 方式一：一行命令安装插件（推荐，无需 Go 环境）
 
-- **Go** `1.27+`（从源码编译时使用，以 `go.mod` 为准）
-- **Antigravity CLI (`agy`)** `1.5+`（系统 `PATH` 中需有 `node` 用于跨平台启动脚本）
-- **`ripgrep` (`rg`)** *（可选但推荐；若未安装 `rg`，`AgyPTC` 会自动降级到内置纯 Go 正则搜索引擎）*
-
-### 1. 编译并安装插件
+只需已安装 **Antigravity (`agy`)** 且系统 `PATH` 中有 **Node.js `18+`**（推荐同时安装 `ripgrep` `rg`）：
 
 ```bash
-git clone https://github.com/aliothmoon/agy-ptc.git
+# 直接从 GitHub 安装（支持 Windows / macOS / Linux，x64 & arm64）
+agy plugin install https://github.com/Aliothmoon/agy-ptc/tree/main/plugin
+```
+
+首次启动（以及后续插件版本升级）时，内置的 `launch.mjs` 守护进程会自动从 GitHub Releases 下载对应系统架构的发布包与 `checksums.txt`，完成 **SHA-256 强校验**后解压至 `${PLUGIN_DATA}/bin/`，真正开箱即用。
+
+### 方式二：下载预编译 Release 包（含独立 `agy-ptc` CLI 与实时 TUI）
+
+如需在终端独立使用 `agy-ptc logs` 实时监控 TUI、`stats`、`bench`、`doctor` 等命令，可从 [**GitHub Releases**](https://github.com/Aliothmoon/agy-ptc/releases) 下载对应平台压缩包：
+
+```bash
+# macOS / Linux
+mkdir -p agy-ptc && tar -xzf agy-ptc_<version>_<os>_<arch>.tar.gz -C agy-ptc
+./agy-ptc/agy-ptc install
+
+# Windows (PowerShell)
+Expand-Archive agy-ptc_<version>_windows_amd64.zip -DestinationPath agy-ptc
+.\agy-ptc\agy-ptc.exe install
+```
+
+### 方式三：从源码编译
+
+环境要求：**Go `1.27+`**
+
+```bash
+git clone https://github.com/Aliothmoon/agy-ptc.git
 cd agy-ptc
 
 # macOS / Linux
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agy-ptc ./cmd/agy-ptc
-./agy-ptc install
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agy-ptc ./cmd/agy-ptc && ./agy-ptc install
 
 # Windows (PowerShell)
-$env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/agy-ptc
-.\agy-ptc.exe install
+$env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/agy-ptc; .\agy-ptc.exe install
 ```
 
-执行 `agy-ptc install` 会自动完成：
-1. 将插件包与二进制同步至 `~/.gemini/config/plugins/agy-ptc`（支持 Windows 下常驻 MCP 进程运行时的原位热替换升级）。
-2. 将 `agy-ptc` CLI 同步到用户 Go Bin 目录（`$GOBIN` 或 `$GOPATH/bin`），方便在任意终端直接调用 `agy-ptc`。
-3. 调用 `agy plugin enable agy-ptc` 启用插件，并执行 `agy-ptc doctor` 完成 MCP 握手、`SessionStart` 钩子延迟与 `agy plugin validate --strict` 严格校验（0 警告 / 0 错误）。
+### 推荐配置（`~/.gemini/antigravity-cli/settings.json`）
 
-### 2. 推荐配置（`~/.gemini/antigravity-cli/settings.json`）
-
-将 `mcp(agy-ptc_vm/exec)` 加入免确认白名单，并可选开启底部实时 TUI 状态栏：
+将 `mcp(agy-ptc_vm/exec)` 加入免确认白名单，并可选开启 CLI 底部实时状态栏：
 
 ```json
 {
@@ -102,204 +131,149 @@ $env:CGO_ENABLED="0"; go build -trimpath -ldflags="-s -w" -o agy-ptc.exe ./cmd/a
 }
 ```
 
-### 3. 两种工作模式
+### 工作模式
 
-1. **混合模式（Hybrid Mode，默认推荐）**：安装后自动在所有 `agy` 会话中生效。少量已知小文件继续走零开销原生 `read_file`；多步搜索、AST 分析、跨文件事务修改与 `<15s` 快速校验优先走 `mcp_agy-ptc_vm_exec`；`>15s` 长任务走原生 `run_command` + `manage_task`。
-2. **纯粹 Code Mode（`ptc` 专属 Agent）**：通过 `agy --agent ptc` 启动（或在对话中输入 `/agents` 切换至 `ptc`），使用聚焦于 `mcp_agy-ptc_vm_exec` 的精简工具集运行。
-
-> **注（Antigravity 桌面端 Swarm 限制）**：桌面版中无 `fork` 的新 `swarm(action="add")` worker 不会继承已配置的 MCP 服务，需通过 `fork`（如 `fork="coordinator"`）拉起；详见[官方论坛 #201194](https://discuss.ai.google.dev/t/bug-fresh-swarm-workers-cannot-access-configured-mcp-servers-call-mcp-tool-missing-context-permission-denied/201194)。
+1. **混合模式（默认自动生效）**：启用插件后自动注入 `mcp_agy-ptc_vm_exec`、路由规则 `rules/AGENTS.md`、技能 `/ptc-exec` 与 `/ptc-refactor`、`SessionStart` 快照钩子，以及 Antigravity 桌面端侧边栏 **AgyPTC（`PTC Panel`）** 可视化监控面板。
+2. **`ptc` 专属智能体 / 子智能体**：可通过 `invoke_subagent(TypeName: "ptc", ...)` 委派，或使用 `agy --agent ptc`（及 `/agents`）启动专注 Code Mode 的智能体。
 
 ---
 
 ## 沙箱 TypeScript API 速查
 
-`code` 会作为 `async` 函数体直接编译（原生支持顶层 `await` 与 `return`，自动剥离 `import type`）。沙箱内已内置常用标准全局工具（`Buffer`、`btoa`/`atob`、`TextEncoder`/`TextDecoder`、`path`、`crypto`、`URL`/`URLSearchParams`、`setTimeout`/`clearTimeout`、`structuredClone`、只读 `process` / `os`），无需额外 `import`。调用时请始终传入当前工作区根目录 `cwd`。
+`code` 作为 `async` TypeScript 函数体直接编译（原生支持顶层 `await`、`print()`/`console.log()` 与 `return`）。内置丰富标准全局对象并支持 `import ... from "node:<mod>"` 与动态 `await import("node:...")`（涵盖 `Buffer`、`zlib`、`util`、`assert`、`events`、`querystring`、`string_decoder`、`module`、`path`、`crypto`、`URL`/`URLSearchParams`、`TextEncoder`/`TextDecoder`、`btoa`/`atob`、`performance`、`setTimeout`、`structuredClone`、`sleep` 及只读 `process` / `os`）。调用时请传入当前工作区根目录 `cwd`。
 
-### 多行代码块传参（`P` / `payloads`）
-将多行替换代码或模板放在顶层参数 `payloads: { newCode: "..." }` 中，在 `code` 内通过 `P.newCode` 读取，彻底避免多层 JSON 转义报错；若引用了不存在的 `P.<key>`，编译预检会在**零副作用**前提下直接精准报错。
+### 多行代码传参（`P` / `payloads`）
+将多行替换代码放入顶层 `payloads: { newFn: "..." }`，在 `code` 中通过 `P.newFn` 引用，彻底规避多层 JSON 字符串转义问题；缺失的 `P.<key>` 会在编译期零副作用拦截。
 
 ### 文件系统与搜索（`fs.*`、`search.*`）
 ```ts
-const [hits, files, modText] = await Promise.all([
-  search.rg("NewEngine", { path: "internal", glob: "*.go", literal: true }),
-  search.glob("**/*_test.go"),
-  fs.read("go.mod"),
+const [hits, testFiles, stat] = await Promise.all([
+  search.rg("NewEngine", { path: "pkg", glob: "*.go", literal: true }),
+  search.glob("**/*_test.go", { detail: true }),
+  fs.stat("go.mod"),
 ]);
-const slice = await fs.read("internal/runtime/engine.go", { startLine: 1, endLine: 60, lineNumbers: true });
-const tree = await fs.tree(".", 2);
+const tail = await fs.read("app.log.gz", { tail: 80, lineNumbers: true });
 ```
-- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers? })`（单文件上限 2 MB）· `fs.cat(paths, opts?)` -> `{ [path]: text | null }`（并行批量读取；读不了的文件为 `null` 并在 Warnings 提示）· `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename`（`mv`）· `fs.cp` · `fs.exists(path)` · `fs.stat(path)` · `fs.list(path)` -> `string[]`; `{ detail: true }` -> `[{ name, isDir, size }]` (dir names end with `/` in both) · `fs.tree(path, depth?)`
+- `fs.read(path, { startLine?, endLine?, tail?, lineNumbers?, maxBytes? })`（默认 `2 MB`，传 `{ maxBytes }` 最高 `16 MB`；自动解压 `.gz` 文本并透明解码 Windows PowerShell 生成的 UTF-16LE/BE BOM 日志）
+- `fs.cat(paths, opts?)` -> `{ [path]: text | null }` · `fs.bytes(path, { offset?, length? })` -> `Buffer` · `fs.hash(path, algo?)`（默认 `sha256`）
+- `fs.write(path, content, { eol? })` · `fs.mkdir` · `fs.rm` · `fs.rename` · `fs.cp` · `fs.exists(path)` · `fs.stat(path)`（含数值 `mtimeMs`）· `fs.list(path, { detail? })` · `fs.tree(path, depth?)`
 - `search.rg(pattern, { path?, glob?, literal?, ignoreCase?, contextLines?, maxResults?, filesOnly?, count? })`
-- `search.glob(pattern, { path?, maxResults? })`（支持 `{a,b}` 花括号展开与容错回退）
-- **跨目录 / 外部路径支持**：相对路径始终基于 `cwd` 解析；在策略允许下（默认开启），所有模块均支持直接传入工作区外的绝对路径或 `../` 跨仓路径（如 `D:/OtherRepo/...`）。
+- `search.glob(pattern, { path?, maxResults?, detail? })`（支持 `{a,b}` 花括号；`{ detail: true }` 返回 `[{ path, size, mtimeMs }]`）
 
 ### AST 符号大纲（`ast.*`）
 ```ts
-const outline = await ast.outline("internal/sandbox/executor.go");
-const sym = await ast.enclosingSymbol("internal/sandbox/executor.go", 320);
-const batch = await ast.outlines(["internal/policy/policy.go", "internal/output/budget.go"]);
+const outline = await ast.outline("pkg/sandbox/executor.go");
+const fn = await ast.read("pkg/sandbox/executor.go", "Executor.Execute");
+const sym = await ast.enclosingSymbol("pkg/sandbox/executor.go", 320);
 ```
-- `.go` 文件采用标准库 `go/parser` 提取精确起止行号；同时支持 TypeScript、JavaScript、Python、Rust、C/C++、Kotlin、Java 与 Markdown 符号扫描。`ast.read(path, "Type::method")` 直接返回单个符号的源码。
+- Go 采用标准库 `go/parser` 精确解析；C、C++、Rust、Python、TypeScript、TSX、JavaScript、Java、Kotlin、C# 与 Markdown 采用纯 Go **Tree-sitter**（`gotreesitter`）精确提取函数、类与方法边界。
 
-### 跨文件原子事务修改（`tx.*` & `edit.*`）
-未提交（`commit`）的事务在验证失败、抛出未捕获异常或触发超时时，**会自动恢复内存快照**（完整保留原文件 CRLF/LF 换行符与文件权限）：
+### 低 Token 原子编辑（`edit.*`）与按需事务回滚（`tx.*`）
+默认使用 `edit.apply` 一次性提交所有文件修改（写入前先完成全部文件 hunk 校验；若后续 `sh.checks` 失败则保留磁盘修改，下一轮只需发增量补丁）：
+
+```ts
+await edit.apply({
+  edits: [
+    { path: "pkg/service/handler.go", hunks: [{ symbol: "Server.Handle", replaceSymbol: true, replacement: P.newHandle }] },
+    { path: "pkg/service/new_helper.go", create: P.helperFile, overwrite: true },
+  ],
+});
+const checks = await sh.checks(["go vet ./...", "go test ./pkg/service/..."]);
+return checks;
+```
+
+若要求校验失败时工作区**必须滴水不沾地恢复原状**，则使用 `tx.begin()` 内存快照事务（未 `commit` 自动回滚）：
 
 ```ts
 const t = await tx.begin();
-
-await t.edit("internal/service/handler.go", [
-  {
-    startLine: 40,
-    endLine: 75,
-    target: P.before,
-    replacement: P.after,
-  },
-]);
-
-const check = await t.verify([
-  { name: "vet", command: "go vet ./..." },
-  { name: "unit", command: "go test ./internal/service/..." },
-]);
-
-if (!check.ok) {
+await t.replaceSymbol("pkg/service/handler.go", "Server.Handle", P.newHandle);
+const v = await t.verify(["go vet ./...", "go test ./pkg/service/..."]);
+if (!v.ok) {
   await t.rollback();
-  return { committed: false, failures: check.failures };
+  return v.failures;
 }
-
 await t.commit();
-return { committed: true, summary: check.summary };
 ```
 
 ### 只读 Git 与受控命令执行（`git.*`、`sh.*`）
 ```ts
-const [status, log] = await Promise.all([
-  git.status(),                    // 非 Git 目录也不会崩 Promise.all，安全返回 { isRepo: false }
-  git.log({ n: 5 }),               // also git.diff({ staged: true, stat: true }), or plain strings
+const [status, log, prHits] = await Promise.all([
+  git.status(),
+  git.log({ n: 5, format: "--oneline" }),
+  git.query('grep -n "NewEngine" HEAD~3 -- pkg'),
 ]);
 
-// 默认 settle: true（非零退出码返回 { ok: false, exitCode, timedOut, output }）
-const vet = await sh.exec("go vet ./...", { timeoutSec: 15, compact: true });
-const checks = await sh.checks(["go vet ./...", "go test ./internal/compiler/..."]);
-
-// 不经过 shell（无引号/方言问题），stdout 与 stderr 分开：{ ok, exitCode, timedOut, stdout, stderr, durationMs }
-const pkgs = await sh.run("go", ["list", "-json", "./..."], { env: { GOFLAGS: "-mod=mod" } });
+const checks = await sh.checks(["go vet ./...", "go test ./pkg/compiler/..."]);
+const pkgs = await sh.run("go", ["list", "-json", "./..."]); // 直接传参，零 shell 转义问题
 ```
+- 只读 `git.*`：`status`、`diff`、`log`、`show`、`branch`、`blame` 及 `query`（支持 `rev-parse`、`grep`、`for-each-ref`、`show-ref`、`rev-list`、`ls-files`、`ls-tree`、`merge-base`、`describe`、`worktree list`、`stash list`、`stash show`）。
+- 智能超时续期：未显式指定顶层 `timeoutMs` 时默认 `20s`；若内层 `sh.exec`、`sh.run`、`sh.checks` 或 `t.verify` 显式传入更大的 `timeoutMs`/`timeoutSec`，自动放宽执行 deadline（最高 `120s`）。
 
-编辑辅助：hunk 的 `symbol: "Type::method"` 把匹配限定在某个函数内（`ast.read(path, symbol)` 返回其源码），`nth` 指定替换第 N 处匹配（类似 `sed s/x/y/N`）；`edit.apply({ ..., dryRun: true })` 返回 `.diff`，`await t.diff()` 返回事务的统一 diff（基于 `git diff --no-index`，需要 `PATH` 中有 `git`）。
-
-### 跨回合状态（`state.*`）与外部 MCP 桥接（`tools.*`、`mcp.*`）
+### 会话状态（`state.*`）与外部 MCP 桥接（`tools.*`、`mcp.*`）
 ```ts
-// 零启动开销检索本地缓存的外部 MCP 工具 Schema：
 const found = await tools.search("wiki");
 if (found.length > 0) {
-  const schema = await tools.describe(found[0].ref);
   const res = await mcp.deepwiki.read_wiki_structure({ repoName: "evanw/esbuild" });
-  state.set("lastWiki", res);
-  return { ref: schema.ref, preview: res.text.slice(0, 400) };
+  state.set("lastWiki", res.data ?? res.text);
+  print(res.text.slice(0, 600));
 }
 ```
-- 输出超过 `9,600` UTF-8 字节时，完整值存入进程内内存的编号键 `state.get("__result_N")`（同时 `"__last_result"` 作为最新结果的别名）。长文本（`print()` 或字符串结果）按行**分页**显示，并附绑定键名的页脚，如 `[page 1/4 · lines 1-212 of 890 · next: print(state.page('__result_1', 2)) · last: state.page('__result_1', -1)]`（并发调用不会串数据）；对象则显示紧凑预览、结构摘要 `Shape` 以及产生大数据的 `Largest results`。不要把 `maxOutputBytes` 调到 10 KB 以上：Antigravity 会把更大的 MCP 输出落盘到 `output.txt`；整文件阅读请用原生 `read_file`。
-
-### 错误
-宿主操作失败会抛出 JS `Error`：`name` 为语义化类型，`message` 为单行 `"op: detail"`；未捕获时会指向出错的用户代码行（`at code:N  <源码>`）：
-
-```text
-Ambiguous: t.edit: src/lib.rs hunk 1: target matches 2 places (L2 in a, L6 in b); set symbol, nth, or replaceAll: true
-  at code:4  await t.edit("src/lib.rs", hunks);
-```
-
-`e.name`：`NotFound` · `NoMatch` · `Ambiguous` · `NeedsApproval` · `Denied` · `Timeout` · `BadArgs` · `CmdFailed` · `Error`。`e.data` 携带结构化细节（如 `{ lines: [2, 6] }`）；`JSON.stringify(e)` 输出同一行文本。结果被截断时（`search.rg`、`search.glob`、`fs.list`、`fs.tree`、`ast.outlines`）会在 `Warnings:` 中提示一次。
+- 超长输出（`>9.6 KB`）自动存入 `state.get("__result_N")` 并按整行分页（`print(state.page("__result_1", 2))`）。
+- 自动发现全局 `~/.gemini/config/mcp_config.json` 与已启用插件的 `mcp_config.json`；对于由 `agy` CLI 私有托管 OAuth 凭据的远程 MCP 服务（如 `sentry`），遇到 HTTP `401`/`403` 时快速返回 `NeedsApproval`，引导模型直接走宿主原生 `call_mcp_tool`（无需重登）。
 
 ---
 
-## 多层超时与子进程防卡死机制
+## 可观测性：桌面端 Sidecar 面板与终端 TUI
 
-为防止误跑长任务（如 `npm run dev`、全量测试或死循环）导致终端卡死：
-
-1. **顶层 `timeoutMs`**：默认 **`20,000ms`（`20s`）**，支持在 `500ms..120,000ms`（`120s`）范围内按需传参调整（亦可通过环境变量 `AGY_PTC_DEFAULT_TIMEOUT_MS` / `AGY_PTC_MAX_TIMEOUT_MS` 配置）。
-2. **单命令超时**：`sh.exec` / `sh.checks` / `tx.verify` 默认单条命令 **`15s`** 超时（支持 `{ timeoutSec }` 与 `{ timeoutMs }`）。
-3. **跨平台进程树强杀 + 管道 `WaitDelay`**：
-   - **Windows**：以 `CREATE_NEW_PROCESS_GROUP` 启动子进程，超时通过 `taskkill /T /F /PID <pid>` 递归强杀整棵子孙进程树，并配合 `WaitDelay: 500ms` 强制断开被孙进程继承的 `stdout`/`stderr` 句柄，彻底杜绝 `cmd.Run()` 永久挂起。
-   - **Unix（Linux / macOS）**：以 `Setpgid: true` 独立进程组运行，超时向 `-pgid` 发送 `SIGKILL` 并配合 `WaitDelay: 500ms` 回收管道。
-4. **安全回滚时序**：超时触发时严格按“强杀子进程树 -> 等待文件句柄释放并收集已输出日志 -> 回滚未提交 `tx.*` 文件快照”顺序执行，避免 Windows 文件锁冲突。
-
----
-
-## 可观测性与 CLI 命令手册
-
-Antigravity CLI 默认 `"verbosity": "medium"` 会在对话界面折叠 MCP 工具入参与返回详情。如需实时查看每次 PTC 执行的 TypeScript 代码与返回结果：
-
-- 在 `agy` 界面按 **`Ctrl+O`**（或在 `settings.json` 中设置 `"verbosity": "high"`），**或者**
-- 在旁侧终端直接运行 **`agy-ptc logs`** 打开交互式实时 TUI 监控面板！
+- **Antigravity 桌面端面板（`PTC Panel`）**：在 Antigravity App 右侧辅助面板打开 **PTC Panel**，即可实时查看执行流、单次能力耗时分解、错误分类占比与健康自检。
+- **终端交互式监控（`agy-ptc` CLI）**：
 
 ```bash
-agy-ptc logs                           # 打开交互式实时 TUI 面板（文件 Diff、多工作区筛选、分类 Tab、弹窗详情）
+agy-ptc logs                           # 打开交互式实时 TUI 面板（文件 Diff、工作区筛选、分类 Tab、详情弹窗）
 agy-ptc errors                         # 打开交互式 TUI 并直接切到 Errors 过滤页
-agy-ptc logs --plain -f                # 纯文本实时流式打印（管道、--json、--full、--id 时自动回退纯文本）
-agy-ptc logs --full --tail 10          # 纯文本查看最近 10 次完整输入代码与输出
+agy-ptc logs --plain -f                # 纯文本实时流式追踪
 agy-ptc logs --id <ptc_id>             # 查看指定运行 ID 的完整源码与调用链明细
 agy-ptc stats                          # 统计错误分类占比与高频失败能力热点
 agy-ptc bench --recent 15              # 分析本地 Antigravity 会话日志的回合压缩率与 0 溢出指标
-agy-ptc run --cwd . --code "return await git.status()"
 agy-ptc doctor                         # 执行 MCP 握手、SessionStart 延迟与 agy --strict 插件体检
-agy-ptc uninstall                      # 卸载全局或项目级 agy-ptc 插件
+agy-ptc uninstall --purge              # 完整卸载插件、CLI 二进制与全部 plugin_data/cache 数据目录
 ```
 
 ---
 
-## 安全与权限边界
+## 安全与权限护栏
 
-> **定位说明**：AgyPTC 的策略层是**防止模型误操作的护栏，而不是安全边界**。`sh.exec` 会把命令交给真实 shell（`sh -c` / `pwsh` / `cmd`）执行，借助解释器（`node -e`、`python -c`）、混淆或间接调用总能绕过模式匹配。面对不可信代码或提示词，请在操作系统层面隔离（容器 / 虚拟机 / 受限用户）。
+> **定位说明**：AgyPTC 的策略层是**防止模型误操作的护栏，而非操作系统级隔离沙箱**。面对不可信代码或提示词，请开启系统级沙箱或容器隔离。
 
-- **对齐宿主权限配置**：自动读取 `~/.gemini/antigravity-cli/settings.json`。命令判定顺序为 `用户 Deny > 内置护栏 > 用户 Ask > 用户 Allow`（`command(*)` 通配放行无法绕过内置护栏）；`mcp(server/tool)` 的 `ask` 规则同样抛出 `NeedsApproval`。如需强制禁止访问工作区以外的路径，可设置 `AGY_PTC_STRICT_WORKSPACE=1` 或配置 `"allowNonWorkspaceAccess": false`。
-- **凭据保护（禁止读写）**：基于符号链接解析后的真实路径，拦截 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker/config.json`、`~/.git-credentials`、`~/.netrc`、`~/.npmrc`、`~/.pypirc`、`~/.config/gh`、`~/.config/gcloud`、`~/.azure`、Cargo 凭据、Gemini `oauth_creds.json` / `mcp_oauth_tokens.json`、`.git/hooks`、`.git/config` 及系统目录。
-- **防自我提权（写入需确认）**：`fs.write` / `edit.*` / `tx.*` 不会改写 Agent 权限与 MCP 配置（家目录**或**工作区中 `.gemini` / `.claude` / `.agents` / `.codex` / `.cursor` 下的 `settings*.json`、`mcp_config.json`、`mcp.json`、`policy.json`、`hooks.json`、`config.toml`）、已安装的插件本体（`~/.gemini/config/plugins/**`、`$PLUGIN_ROOT`）、shell 启动文件（`~/.bashrc`、`~/.zshrc`、`~/.profile`、PowerShell `$PROFILE` 等）以及 `~/.gitconfig`。
-- **内置命令护栏**：分类参考 Netcatty AI 默认命令黑名单的 shell 族分组（规则按 Go RE2 独立重写）。命中的命令不会执行，而是抛出带规则名的 `NeedsApproval`，引导模型升级到原生 `run_command`：
-  - 任意写法的递归强制删除（`rm -rf` / `-fr` / `-r -f` / `--recursive --force`、`Remove-Item -Recurse -Force`、`rd /s`、`del /s`、`find -delete`）；
-  - 会发布或丢弃工作的 git 操作（`push`、`reset --hard`、`clean -f`、`checkout -- .`、`restore <工作区>`、`switch --discard-changes`、`stash drop/clear`、`branch -D`、`filter-branch`、`reflog expire`、`gc --prune`、`config --global` 写入）；
-  - 磁盘 / 设备 / 电源 / 系统文件（`mkfs`、`dd of=/dev/...`、`diskpart`、`format C:`、`shutdown`、`> /etc/...`、`chmod -R 777 /`、fork bomb）；
-  - 远程或混淆代码执行（`curl ... | sh`、`iwr ... | iex`、`base64 -d | sh`、`eval`、`Invoke-Expression`、`pwsh -EncodedCommand`、`Set-ExecutionPolicy Bypass`）；
-  - 对外发布 / 基础设施变更（`npm publish`、`cargo publish`、`docker push`、`gh pr merge`、`kubectl delete`、`terraform apply`）；
-  - 凭据访问与经 shell 的自我提权（`cat ~/.ssh/...`、`>> ~/.bashrc`、写 `.gemini` / `.claude` 配置），以及 `sudo` / `su` / `doas`。
-- **只读 `git.*`**：`branch` / `tag` 只接受列表类选项（按模式过滤须加 `--list`）；`remote` 仅允许 `-v`、`show`、`get-url`；拒绝 `--output`、`--ext-diff`、`--exec*`、`--upload-pack`。
-- **工作区 MCP 配置默认不受信任**：`<workspace>/.agents/mcp_config.json` 可以声明任意 `command`，因此默认忽略；如需启用，设置 `AGY_PTC_TRUST_WORKSPACE_MCP=1` 或在 `~/.gemini/config/agy-ptc/policy.json` 中配置 `"agyPtcTrustWorkspaceMcp": true`。全局 `~/.gemini/config/mcp_config.json` 始终生效。
-- **如实上报回滚结果**：回滚会对短暂的文件锁重试；仍无法恢复的文件会被报告（`tx.rollback()` 返回 `ok: false, status: "rollback_incomplete", failedFiles`），未提交 `tx` 的自动回滚也会出现在响应的 `Warnings:` 段中。`tx` 之外的多文件 `edit.apply` 若中途写入失败，会撤销本次已写入的文件。注意：`t.verify()` 中命令（如 `gofmt -w`、代码生成）改动的文件**不在**快照范围内。
+- **对齐宿主权限配置**：自动读取 `~/.gemini/antigravity-cli/settings.json`（优先级：`用户 Deny > 内置护栏 > 用户 Ask > 用户 Allow`）。设置 `AGY_PTC_STRICT_WORKSPACE=1` 或 `"allowNonWorkspaceAccess": false` 可强制锁定仅访问当前工作区。
+- **凭据与防自提权保护**：基于符号链接解析拦截 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker/config.json`、`~/.git-credentials`、`~/.netrc`、`~/.npmrc`、`~/.config/gh`、`~/.config/gcloud`、OAuth 凭据文件、`.git/hooks`、`.git/config` 的读写；修改任何 Agent/MCP 配置文件（`settings*.json`、`mcp_config.json`、`hooks.json`、`policy.json`）或 shell 启动脚本均强制要求审批。
+- **高危命令升级审批（`NeedsApproval`）**：递归强删（`rm -rf`、`Remove-Item -Recurse -Force`）、发布或丢弃工作的 Git 操作（`git push`、`reset --hard`、`clean -f`、`checkout -- .`、`branch -D`）、磁盘/系统命令、管道远程执行及包发布操作均不会在沙箱内直接运行，而是抛出 `NeedsApproval` 交由原生 `run_command` 弹窗确认。
+- **工作区 MCP 默认隔离**：默认忽略不受信任的 `<workspace>/.agents/mcp_config.json`，除非显式设置 `AGY_PTC_TRUST_WORKSPACE_MCP=1` 或在 `~/.gemini/config/agy-ptc/policy.json` 中开启 `"agyPtcTrustWorkspaceMcp": true`。
 
 ---
 
 ## 目录结构
 
-`AgyPTC` 是面向 Antigravity CLI 的轻量插件外壳，核心引擎通过标准 Go Module 依赖自 [`github.com/aliothmoon/mcplex/pkg/...`](https://github.com/Aliothmoon/mcplex)：
-
 ```text
 AgyPTC/
-├── cmd/agy-ptc/             # CLI 入口（mcp, hook, statusline, run, logs, errors, stats, bench, install, doctor）
+├── cmd/agy-ptc/             # CLI 入口（mcp, hook, statusline, run, logs, errors, stats, bench, install, uninstall, doctor）
 ├── internal/
-│   ├── snapshot/            # <= 1.5 KB SessionStart 工作区快照钩子与 TUI 状态栏渲染
+│   ├── snapshot/            # <= 1.5 KB SessionStart 工作区快照钩子与 CLI 状态栏
 │   ├── bench/               # Antigravity 本地 transcript.jsonl 效率统计工具
-│   └── version/             # 插件独立版本号（与 plugin/plugin.json 强一致校验）
-└── plugin/                  # Antigravity CLI 插件包（plugin.json, mcp_config.json, hooks.json, rules, agents, skills）
-
-github.com/aliothmoon/mcplex（共享 Go 核心模块）
-└── pkg/
-    ├── compiler/            # esbuild TS -> ES2020 编译、VLQ 源码行号映射与词法级 payload 预检
-    ├── sandbox/             # 隔离 goja VM、异步 Goroutine -> 微任务事件循环、超时看门狗与操作预算
-    ├── capabilities/        # fs, search, ast, edit, tx, git, sh, state, 外部 MCP 桥接与跨平台进程树管控
-    ├── policy/              # 真实路径解析、敏感文件防护与 settings.json 权限规则引擎
-    ├── output/              # <= 9,600 B UTF-8 注水法字节预算器与终端 ANSI/噪声清洗
-    ├── runtime/             # 核心引擎编排、工作区 cwd 安全解析、超限自动转存 state 与实时状态输出
-    ├── mcpserver/           # Stdio 与 Streamable HTTP JSON-RPC 2.0 MCP 服务端
-    ├── audit/               # JSONL 执行/错误审计日志与错误热点分类器
-    └── skill/               # 内嵌的客户端无关 Code Mode 指南
+│   └── version/             # 插件版本号（与 plugin/plugin.json 强一致校验）
+└── plugin/                  # Antigravity 插件包
+    ├── plugin.json          # 插件清单（通过 `agy plugin validate --strict` 零警告校验）
+    ├── scripts/launch.mjs   # MCP 守护代理、热重载与 SHA-256 校验二进制自动自举
+    ├── sidecars/ptc_panel/  # Antigravity App 辅助 Web UI 监控面板
+    ├── agents/ptc.md        # Code Mode 专属智能体 / 子智能体
+    ├── rules/AGENTS.md      # 常驻路由规则与 API 速查
+    └── skills/              # /ptc-exec 与 /ptc-refactor 技能
 ```
 
 ---
 
-## 致谢
+## 致谢与开源协议
 
 - 设计灵感源自 [`fabric-runtime/pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 与 [`INK-Q/agy-fast`](https://github.com/INK-Q/agy-fast)。
-- 核心沙箱构建于 [`evanw/esbuild`](https://github.com/evanw/esbuild) 与 [`dop251/goja`](https://github.com/dop251/goja) 之上。
-
-## 开源协议
-
-本项目基于 [MIT License](./LICENSE) 开源。
+- 核心驱动基于 [`MCPlex`](https://github.com/Aliothmoon/mcplex)、[`evanw/esbuild`](https://github.com/evanw/esbuild)、[`dop251/goja`](https://github.com/dop251/goja) 与 [`odvcencio/gotreesitter`](https://github.com/odvcencio/gotreesitter)。
+- 本项目基于 [MIT License](./LICENSE) 开源。
