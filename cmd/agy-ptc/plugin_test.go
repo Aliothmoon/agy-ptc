@@ -1,10 +1,18 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -546,5 +554,235 @@ func TestRunLogsJSONRespectsTailAndID(t *testing.T) {
 	var parsedBig []map[string]any
 	if err := json.Unmarshal(rawBig, &parsedBig); err != nil || len(parsedBig) != 80 {
 		t.Fatalf("expected valid 80-entry JSON after auto-compaction, got len=%d err=%v", len(parsedBig), err)
+	}
+}
+
+func TestPluginManifestAndReadmeMarketplaceReadiness(t *testing.T) {
+	pluginDir := filepath.Join("..", "..", "plugin")
+	rawManifest, err := os.ReadFile(filepath.Join(pluginDir, "plugin.json"))
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	var m struct {
+		Name             string   `json:"name"`
+		DisplayName      string   `json:"displayName"`
+		Version          string   `json:"version"`
+		Description      string   `json:"description"`
+		Logo             string   `json:"logo"`
+		SuggestedPrompts []string `json:"suggestedPrompts"`
+		Homepage         string   `json:"homepage"`
+		Repository       string   `json:"repository"`
+		License          string   `json:"license"`
+	}
+	if err := json.Unmarshal(rawManifest, &m); err != nil {
+		t.Fatalf("unmarshal plugin.json: %v", err)
+	}
+	if m.Name != "agy-ptc" {
+		t.Fatalf("expected name 'agy-ptc', got %q", m.Name)
+	}
+	if m.DisplayName != "AgyPTC" {
+		t.Fatalf("expected displayName 'AgyPTC', got %q", m.DisplayName)
+	}
+	if len(m.Description) < 80 || len(m.Description) > 160 {
+		t.Fatalf("expected description length in 80..160 chars for Marketplace cards, got %d (%q)", len(m.Description), m.Description)
+	}
+	if m.Logo == "" {
+		t.Fatal("expected bundled logo path in plugin.json")
+	}
+	if _, err := os.Stat(filepath.Join(pluginDir, filepath.FromSlash(m.Logo))); err != nil {
+		t.Fatalf("bundled logo %q missing: %v", m.Logo, err)
+	}
+	if len(m.SuggestedPrompts) == 0 || len(m.SuggestedPrompts) > 3 {
+		t.Fatalf("expected 1..3 suggestedPrompts, got %d", len(m.SuggestedPrompts))
+	}
+
+	rawReadme, err := os.ReadFile(filepath.Join(pluginDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read plugin/README.md: %v", err)
+	}
+	readme := string(rawReadme)
+	if len(readme) < 600 {
+		t.Fatalf("expected standalone Marketplace overview in plugin/README.md, got %d bytes", len(readme))
+	}
+	if strings.Contains(readme, "](../") || strings.Contains(readme, "](./../") {
+		t.Fatal("plugin/README.md contains parent-relative links (../) that break in Marketplace bundles")
+	}
+}
+
+func buildMockReleaseArchive(t *testing.T, binBytes []byte, binName string) (archiveName string, archiveBytes []byte, shaHex string) {
+	t.Helper()
+	rawManifest, err := os.ReadFile(filepath.Join("..", "..", "plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(rawManifest, &m); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if runtime.GOOS == "windows" {
+		archiveName = "agy-ptc_" + m.Version + "_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+		zw := zip.NewWriter(&buf)
+		fw, err := zw.Create(binName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write(binBytes); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		archiveName = "agy-ptc_" + m.Version + "_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+		gw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gw)
+		hdr := &tar.Header{
+			Name:     "./" + binName,
+			Mode:     0o755,
+			Size:     int64(len(binBytes)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(binBytes); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archiveBytes = buf.Bytes()
+	sum := sha256.Sum256(archiveBytes)
+	shaHex = hex.EncodeToString(sum[:])
+	return archiveName, archiveBytes, shaHex
+}
+
+func TestLaunchMjsAutoBootstrapWithSHA256Verification(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		t.Skipf("unsupported test arch %s", runtime.GOARCH)
+	}
+
+	tmp := t.TempDir()
+	binName := "agy-ptc"
+	if runtime.GOOS == "windows" {
+		binName = "agy-ptc.exe"
+	}
+	builtBin := filepath.Join(tmp, "built-"+binName)
+	if out, bErr := exec.Command("go", "build", "-o", builtBin, ".").CombinedOutput(); bErr != nil {
+		t.Fatalf("go build failed: %v\n%s", bErr, out)
+	}
+	binBytes, err := os.ReadFile(builtBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveName, archiveBytes, validSha := buildMockReleaseArchive(t, binBytes, binName)
+
+	launchScript, err := filepath.Abs(filepath.Join("..", "..", "plugin", "scripts", "launch.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Tampered SHA-256 in checksums.txt MUST be rejected without installing the binary.
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/checksums.txt":
+			_, _ = io.WriteString(w, strings.Repeat("0", 64)+"  "+archiveName+"\n")
+		case "/" + archiveName:
+			_, _ = w.Write(archiveBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer badSrv.Close()
+
+	badDataDir := filepath.Join(tmp, "bad-data")
+	badCmd := exec.Command(nodeBin, launchScript, "mcp", "--data-dir", badDataDir)
+	badCmd.Env = append(os.Environ(),
+		"AGY_PTC_BIN=",
+		"AGY_PTC_SKIP_LOCAL=1",
+		"AGY_PTC_SKIP_PATH=1",
+		"AGY_PTC_RELEASE_BASE_URL="+badSrv.URL,
+	)
+	badIn, _ := badCmd.StdinPipe()
+	badOut, _ := badCmd.StdoutPipe()
+	if err := badCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(badIn, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}`+"\n")
+	badLine, err := bufio.NewReader(badOut).ReadString('\n')
+	_ = badIn.Close()
+	_ = badCmd.Wait()
+	if err != nil || !strings.Contains(badLine, "SHA-256 mismatch") {
+		t.Fatalf("expected SHA-256 mismatch error response, got err=%v line=%s", err, badLine)
+	}
+	if _, stErr := os.Stat(filepath.Join(badDataDir, "bin", binName)); !os.IsNotExist(stErr) {
+		t.Fatalf("tampered binary must not be written to dataDir/bin, stat err=%v", stErr)
+	}
+
+	// 2. Valid SHA-256 auto-downloads, extracts to ${PLUGIN_DATA}/bin, and completes MCP initialize + exec round-trip!
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/checksums.txt":
+			_, _ = io.WriteString(w, validSha+"  "+archiveName+"\n")
+		case "/" + archiveName:
+			_, _ = w.Write(archiveBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer goodSrv.Close()
+
+	goodDataDir := filepath.Join(tmp, "good-data")
+	goodCmd := exec.Command(nodeBin, launchScript, "mcp", "--data-dir", goodDataDir)
+	goodCmd.Env = append(os.Environ(),
+		"AGY_PTC_BIN=",
+		"AGY_PTC_SKIP_LOCAL=1",
+		"AGY_PTC_SKIP_PATH=1",
+		"AGY_PTC_RELEASE_BASE_URL="+goodSrv.URL,
+	)
+	goodIn, _ := goodCmd.StdinPipe()
+	goodOut, _ := goodCmd.StdoutPipe()
+	if err := goodCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = goodIn.Close()
+		_ = goodCmd.Wait()
+		for i := 0; i < 20; i++ {
+			if err := os.Remove(filepath.Join(goodDataDir, "bin", binName)); err == nil || os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	goodReader := bufio.NewReader(goodOut)
+	_, _ = io.WriteString(goodIn, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}`+"\n")
+	initLine, err := goodReader.ReadString('\n')
+	if err != nil || !strings.Contains(initLine, `"protocolVersion"`) {
+		t.Fatalf("expected valid initialize response after auto-bootstrap, got err=%v line=%s", err, initLine)
+	}
+	_, _ = io.WriteString(goodIn, `{"jsonrpc":"2.0","method":"notifications/initialized"}`+"\n")
+
+	wsJSON, _ := json.Marshal(tmp)
+	_, _ = io.WriteString(goodIn, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec","arguments":{"cwd":`+string(wsJSON)+`,"code":"return 40 + 2;"}}}`+"\n")
+	execLine, err := goodReader.ReadString('\n')
+	if err != nil || !strings.Contains(execLine, "42") {
+		t.Fatalf("expected exec result 42 from auto-bootstrapped binary, got err=%v line=%s", err, execLine)
+	}
+	if _, stErr := os.Stat(filepath.Join(goodDataDir, "bin", binName)); stErr != nil {
+		t.Fatalf("expected bootstrapped binary in %s/bin: %v", goodDataDir, stErr)
 	}
 }

@@ -1,26 +1,291 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync, inflateRawSync } from "node:zlib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pluginRoot = path.resolve(__dirname, "..");
 const binName = process.platform === "win32" ? "agy-ptc.exe" : "agy-ptc";
 
-function resolveBinary() {
+function readManifestMeta() {
+  try {
+    const raw = readFileSync(path.join(pluginRoot, "plugin.json"), "utf8");
+    const m = JSON.parse(raw);
+    return {
+      version: typeof m.version === "string" ? m.version.trim() : "",
+      repository:
+        typeof m.repository === "string" && m.repository.trim()
+          ? m.repository.trim().replace(/\.git$/i, "").replace(/\/+$/, "")
+          : "https://github.com/Aliothmoon/agy-ptc",
+    };
+  } catch {
+    return { version: "", repository: "https://github.com/Aliothmoon/agy-ptc" };
+  }
+}
+
+function resolveDataDir(cliArgs) {
+  for (let i = 0; i < cliArgs.length; i++) {
+    if (cliArgs[i] === "--data-dir" && cliArgs[i + 1]) {
+      return cliArgs[i + 1];
+    }
+    if (cliArgs[i].startsWith("--data-dir=")) {
+      return cliArgs[i].slice("--data-dir=".length);
+    }
+  }
+  const envData = (process.env.PLUGIN_DATA || "").trim();
+  if (envData) return envData;
+  return path.join(homedir(), ".gemini", "antigravity-cli", "plugin_data", "agy-ptc");
+}
+
+function findOnPath(exeName) {
+  if (process.env.AGY_PTC_SKIP_PATH === "1") return "";
+  const pathEnv = process.env.PATH || process.env.Path || "";
+  for (const rawDir of pathEnv.split(path.delimiter)) {
+    const dir = rawDir.trim().replace(/^"|"$/g, "");
+    if (!dir) continue;
+    const cand = path.join(dir, exeName);
+    if (existsSync(cand)) return cand;
+  }
+  return "";
+}
+
+// Returns an immediately usable binary path, or "" when Marketplace first-run / version-upgrade bootstrap is needed.
+function resolveExistingBinary(dataDir) {
   if (process.env.AGY_PTC_BIN && existsSync(process.env.AGY_PTC_BIN)) {
     return process.env.AGY_PTC_BIN;
   }
-  const candidates = [
-    path.join(__dirname, binName),
-    path.resolve(__dirname, "..", "..", binName),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
+  if (process.env.AGY_PTC_SKIP_LOCAL !== "1") {
+    const localCandidates = [
+      path.join(__dirname, binName),
+      path.resolve(__dirname, "..", "..", binName),
+    ];
+    for (const candidate of localCandidates) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
     }
   }
-  return binName;
+
+  const { version: manifestVer } = readManifestMeta();
+  const dataBin = path.join(dataDir, "bin", binName);
+  const verStampPath = path.join(dataDir, "bin", ".version");
+  if (existsSync(dataBin)) {
+    let stampedVer = "";
+    try {
+      stampedVer = readFileSync(verStampPath, "utf8").trim();
+    } catch {}
+    if (!manifestVer || stampedVer === manifestVer) {
+      return dataBin;
+    }
+  }
+
+  const pathBin = findOnPath(binName);
+  if (pathBin) return pathBin;
+
+  return "";
+}
+
+function mapPlatformTarget() {
+  const osMap = { win32: "windows", darwin: "darwin", linux: "linux" };
+  const archMap = { x64: "amd64", arm64: "arm64" };
+  const osName = osMap[process.platform];
+  const archName = archMap[process.arch];
+  if (!osName || !archName) {
+    throw new Error(`unsupported platform ${process.platform}/${process.arch}`);
+  }
+  const ext = osName === "windows" ? ".zip" : ".tar.gz";
+  return { osName, archName, ext };
+}
+
+function parseChecksumForAsset(checksumsText, assetName) {
+  for (const rawLine of checksumsText.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const m = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(line);
+    if (!m) continue;
+    const file = path.posix.basename(m[2].trim().replace(/\\/g, "/"));
+    if (file === assetName) {
+      return m[1].toLowerCase();
+    }
+  }
+  return "";
+}
+
+function extractBinaryFromZip(buf, targetBaseName) {
+  const minEOCD = 22;
+  const maxComment = 65535;
+  let eocd = -1;
+  for (let i = buf.length - minEOCD; i >= Math.max(0, buf.length - minEOCD - maxComment); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50 && buf.readUInt16LE(i + 20) === buf.length - i - minEOCD) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    throw new Error("invalid zip archive (missing EOCD)");
+  }
+  const totalEntries = buf.readUInt16LE(eocd + 10);
+  let ptr = buf.readUInt32LE(eocd + 16);
+  for (let idx = 0; idx < totalEntries && ptr + 46 <= buf.length; idx++) {
+    if (buf.readUInt32LE(ptr) !== 0x02014b50) {
+      throw new Error("invalid zip central directory header");
+    }
+    const method = buf.readUInt16LE(ptr + 10);
+    const compSize = buf.readUInt32LE(ptr + 20);
+    const uncompSize = buf.readUInt32LE(ptr + 24);
+    const nameLen = buf.readUInt16LE(ptr + 28);
+    const extraLen = buf.readUInt16LE(ptr + 30);
+    const commentLen = buf.readUInt16LE(ptr + 32);
+    const localOffset = buf.readUInt32LE(ptr + 42);
+    const entryName = buf.subarray(ptr + 46, ptr + 46 + nameLen).toString("utf8").replace(/\\/g, "/");
+    ptr += 46 + nameLen + extraLen + commentLen;
+
+    const normalized = entryName.replace(/^\.\//, "");
+    if (normalized === targetBaseName || (!normalized.includes("/") && path.posix.basename(normalized) === targetBaseName)) {
+      if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== 0x04034b50) {
+        throw new Error("invalid zip local file header");
+      }
+      const lNameLen = buf.readUInt16LE(localOffset + 26);
+      const lExtraLen = buf.readUInt16LE(localOffset + 28);
+      const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+      const compSlice = buf.subarray(dataStart, dataStart + compSize);
+      let out;
+      if (method === 0) {
+        out = Buffer.from(compSlice);
+      } else if (method === 8) {
+        out = inflateRawSync(compSlice);
+      } else {
+        throw new Error(`unsupported zip compression method ${method}`);
+      }
+      if (out.length !== uncompSize) {
+        throw new Error(`zip size mismatch (${out.length} != ${uncompSize})`);
+      }
+      return out;
+    }
+  }
+  throw new Error(`${targetBaseName} not found in zip archive`);
+}
+
+function extractBinaryFromTarGz(buf, targetBaseName) {
+  const tar = gunzipSync(buf);
+  let off = 0;
+  while (off + 512 <= tar.length) {
+    const hdr = tar.subarray(off, off + 512);
+    if (hdr.every((b) => b === 0)) break;
+
+    const rawName = hdr.subarray(0, 100).toString("utf8").replace(/\0.*$/, "");
+    const prefix = hdr.subarray(345, 500).toString("utf8").replace(/\0.*$/, "");
+    const sizeStr = hdr.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
+    const size = sizeStr ? parseInt(sizeStr, 8) : 0;
+    const typeFlag = hdr[156];
+    const dataStart = off + 512;
+    const fullName = (prefix ? `${prefix}/${rawName}` : rawName).replace(/^\.\//, "");
+
+    if ((typeFlag === 0 || typeFlag === 0x30) && fullName === targetBaseName) {
+      return Buffer.from(tar.subarray(dataStart, dataStart + size));
+    }
+    off = dataStart + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`${targetBaseName} not found in tar.gz archive`);
+}
+
+async function fetchBufferWithTimeout(url, timeoutMs = 60000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      signal: ctrl.signal,
+      headers: { "User-Agent": "agy-ptc-plugin-bootstrap" },
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} fetching ${url}`);
+    }
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function ensureBootstrappedBinary(dataDir) {
+  const existing = resolveExistingBinary(dataDir);
+  if (existing) return existing;
+
+  const { version, repository } = readManifestMeta();
+  if (!version) {
+    throw new Error("missing version in plugin.json");
+  }
+  const { osName, archName, ext } = mapPlatformTarget();
+  const assetName = `agy-ptc_${version}_${osName}_${archName}${ext}`;
+  const baseUrl = (
+    process.env.AGY_PTC_RELEASE_BASE_URL || `${repository}/releases/download/v${version}`
+  ).replace(/\/+$/, "");
+
+  const binDir = path.join(dataDir, "bin");
+  const dstBin = path.join(binDir, binName);
+  const verStampPath = path.join(binDir, ".version");
+
+  try {
+    mkdirSync(binDir, { recursive: true });
+    const [checksumsRaw, archiveBuf] = await Promise.all([
+      fetchBufferWithTimeout(`${baseUrl}/checksums.txt`, 20000),
+      fetchBufferWithTimeout(`${baseUrl}/${assetName}`, 90000),
+    ]);
+
+    const expectedSha = parseChecksumForAsset(checksumsRaw.toString("utf8"), assetName);
+    if (!expectedSha) {
+      throw new Error(`asset ${assetName} missing from checksums.txt`);
+    }
+    const actualSha = createHash("sha256").update(archiveBuf).digest("hex").toLowerCase();
+    if (actualSha !== expectedSha) {
+      throw new Error(`SHA-256 mismatch for ${assetName} (expected ${expectedSha}, got ${actualSha})`);
+    }
+
+    const extracted =
+      ext === ".zip"
+        ? extractBinaryFromZip(archiveBuf, binName)
+        : extractBinaryFromTarGz(archiveBuf, binName);
+
+    const tmpFile = path.join(binDir, `.${binName}.tmp-${process.pid}-${Date.now()}`);
+    writeFileSync(tmpFile, extracted, { mode: 0o755 });
+    if (process.platform !== "win32") {
+      chmodSync(tmpFile, 0o755);
+    }
+
+    if (existsSync(dstBin)) {
+      const oldBackup = `${dstBin}.${process.pid}.old`;
+      try {
+        renameSync(dstBin, oldBackup);
+        try {
+          unlinkSync(oldBackup);
+        } catch {}
+      } catch {}
+    }
+    renameSync(tmpFile, dstBin);
+    writeFileSync(verStampPath, `${version}\n`, "utf8");
+    return dstBin;
+  } catch (err) {
+    // Offline fallback: if an older bootstrapped binary already exists in PLUGIN_DATA/bin, keep running instead of breaking.
+    if (existsSync(dstBin) && !String(err?.message || "").includes("SHA-256 mismatch")) {
+      process.stderr.write(`[agy-ptc] warning: update to v${version} skipped (${err.message}); using cached binary\n`);
+      return dstBin;
+    }
+    throw err;
+  }
 }
 
 function cleanupOldBinaries(binPath) {
@@ -133,8 +398,25 @@ function idKey(id) {
 
 const REINIT_ID = "__agy_ptc_supervisor_reinit__";
 
-function runDirect(args) {
-  const binPath = resolveBinary();
+async function runDirect(args) {
+  const dataDir = resolveDataDir(args);
+  let binPath = resolveExistingBinary(dataDir);
+  if (!binPath) {
+    // Do not block the 5s SessionStart hook on a cold ~15MB binary download; the MCP server handles bootstrap.
+    if (args[0] === "hook") {
+      process.stdout.write("{}\n");
+      process.exit(0);
+      return;
+    }
+    try {
+      binPath = await ensureBootstrappedBinary(dataDir);
+    } catch (err) {
+      process.stderr.write(`agy-ptc bootstrap error: ${err.message}\n`);
+      process.exit(1);
+      return;
+    }
+  }
+
   const child = spawn(binPath, args, {
     stdio: "inherit",
     windowsHide: true,
@@ -158,15 +440,17 @@ function runDirect(args) {
   });
 }
 
-// Supervised MCP stdio proxy: keeps the host MCP pipe alive across `agy-ptc install`
-// binary hot-swaps (reloading cleanly while idle) and unexpected worker exits.
+// Supervised MCP stdio proxy: keeps the host MCP pipe alive across binary hot-swaps,
+// cold Marketplace binary bootstrap, and unexpected worker exits.
 function runSupervisedMCP(args) {
+  const dataDir = resolveDataDir(args);
   let shuttingDown = false;
   let hostUseContentLength = false;
   let savedInitParams = null;
   let sawInitializedNotif = false;
 
   let worker = null;
+  let bootstrapping = null;
   const pendingFrames = [];
   const inFlight = new Map(); // idKey -> { id, method, useContentLength }
   const crashTimes = [];
@@ -235,8 +519,8 @@ function runSupervisedMCP(args) {
     inFlight.clear();
   }
 
-  function startWorker(needsReplay) {
-    const binPath = resolveBinary();
+  function startWorker(needsReplay, explicitBinPath = "") {
+    const binPath = explicitBinPath || resolveExistingBinary(dataDir) || binName;
     cleanupOldBinaries(binPath);
     const sig = statSignature(binPath);
 
@@ -334,7 +618,8 @@ function runSupervisedMCP(args) {
     if (!worker || !worker.ready || inFlight.size > 0 || savedInitParams === null) {
       return;
     }
-    const latestBin = resolveBinary();
+    const latestBin = resolveExistingBinary(dataDir);
+    if (!latestBin) return;
     const latestSig = statSignature(latestBin);
     if (latestBin === worker.binPath && latestSig === worker.sig) {
       return;
@@ -352,7 +637,7 @@ function runSupervisedMCP(args) {
     }, 2000);
     killTimer.unref?.();
 
-    startWorker(true);
+    startWorker(true, latestBin);
   }
 
   const parseHostIn = createRpcFramer((raw, useCL) => {
@@ -375,6 +660,38 @@ function runSupervisedMCP(args) {
     maybeHotReloadIdleWorker();
 
     if (!worker) {
+      const existingBin = resolveExistingBinary(dataDir);
+      if (!existingBin) {
+        pendingFrames.push({ raw, parsed, useContentLength: useCL });
+        if (!bootstrapping) {
+          bootstrapping = ensureBootstrappedBinary(dataDir)
+            .then((downloadedBin) => {
+              bootstrapping = null;
+              if (shuttingDown || worker) return;
+              const firstIsInit =
+                pendingFrames.length > 0 &&
+                pendingFrames[0].parsed &&
+                !Array.isArray(pendingFrames[0].parsed) &&
+                pendingFrames[0].parsed.method === "initialize";
+              startWorker(savedInitParams !== null && !firstIsInit, downloadedBin);
+              flushPendingToWorker();
+            })
+            .catch((err) => {
+              bootstrapping = null;
+              while (pendingFrames.length > 0) {
+                const f = pendingFrames.shift();
+                if (f.parsed) {
+                  recordInFlightFromPayload(f.parsed, f.useContentLength);
+                }
+              }
+              failInFlightRequests(
+                `AgyPTC binary bootstrap failed (${err.message}); verify network access or install manually from https://github.com/Aliothmoon/agy-ptc/releases`,
+              );
+            });
+        }
+        return;
+      }
+
       const replay =
         savedInitParams !== null &&
         !(parsed && !Array.isArray(parsed) && parsed.method === "initialize");
@@ -382,7 +699,7 @@ function runSupervisedMCP(args) {
         failInFlightRequests("PTC worker crashed repeatedly within 10s; run `agy-ptc doctor` to diagnose.");
         return;
       }
-      startWorker(replay);
+      startWorker(replay, existingBin);
     }
 
     if (!worker.ready) {

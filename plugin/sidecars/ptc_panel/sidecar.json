@@ -4,11 +4,11 @@
     "server.mjs"
   ],
   "description": "Programmatic Tool Calling (Code Mode) runtime monitor, audit logs, and policy panel.",
-  "display_name": "PTC Code Mode",
+  "display_name": "AgyPTC",
   "has_web_ui": true,
   "restart_policy": "always",
   "ui_config": {
-    "display_name": "PTC Code Mode",
+    "display_name": "AgyPTC",
     "views": [
       {
         "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",

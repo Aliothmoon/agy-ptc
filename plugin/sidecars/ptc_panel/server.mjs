@@ -79,8 +79,13 @@ export function discoverLogDirs(primaryDataDir) {
 }
 
 function resolveBinary(pluginRoot) {
+  if (process.env.AGY_PTC_BIN && existsSync(process.env.AGY_PTC_BIN)) {
+    return process.env.AGY_PTC_BIN;
+  }
   const localBin = join(pluginRoot, 'scripts', BIN_NAME);
   if (existsSync(localBin)) return localBin;
+  const dataBin = join(resolveDataDir(), 'bin', BIN_NAME);
+  if (existsSync(dataBin)) return dataBin;
   return BIN_NAME;
 }
 

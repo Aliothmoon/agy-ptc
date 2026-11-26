@@ -4,7 +4,7 @@ export function buildUiHtml() {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PTC Code Mode</title>
+  <title>AgyPTC</title>
   <script src="/preload.js"></script>
   <style>
     :root {

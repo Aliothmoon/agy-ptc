@@ -1,10 +1,10 @@
 {
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "agy-ptc",
-  "displayName": "PTC Code Mode",
+  "displayName": "AgyPTC",
   "version": "0.8.4",
-  "description": "Programmatic Tool Calling (Code Mode) runtime for Antigravity CLI: compose search, AST outlines, low-token multi-file atomic edits, fast checks, and external MCP calls in one TypeScript turn.",
-  "logo": "assets/logo.svg",
+  "description": "Programmatic Tool Calling runtime: compose search, AST outlines, atomic multi-file edits, fast checks, and MCP calls in one TypeScript turn.",
+  "logo": "assets/logo.png",
   "suggestedPrompts": [
     "Audit all Go handlers in this repo, outline missing error checks, and summarize findings in one PTC run",
     "Refactor symbol usages across files in one atomic edit.apply batch and verify with sh.checks",
