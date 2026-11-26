@@ -66,15 +66,17 @@ func AnalyzeLocal(recent int) (string, error) {
 		found = found[:recent]
 	}
 	if len(found) == 0 {
-		return "No local transcript.jsonl files found.", nil
+		return "No local transcript.jsonl files found.\n", nil
 	}
 
 	var agg SessionReport
+	analyzed := 0
 	for _, item := range found {
 		rep, err := AnalyzeFile(item.path)
 		if err != nil {
 			continue
 		}
+		analyzed++
 		agg.PlannerTurns += rep.PlannerTurns
 		agg.TotalToolCalls += rep.TotalToolCalls
 		agg.PTCCalls += rep.PTCCalls
@@ -85,7 +87,10 @@ func AnalyzeLocal(recent int) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "AgyPTC Local Transcript Benchmark (%d sessions analyzed)\n", len(found))
+	fmt.Fprintf(&b, "AgyPTC Local Transcript Benchmark (%d sessions analyzed)\n", analyzed)
+	if skipped := len(found) - analyzed; skipped > 0 {
+		fmt.Fprintf(&b, "  - Unreadable (skipped)  : %d\n", skipped)
+	}
 	fmt.Fprintf(&b, "  - Total LLM turns       : %d\n", agg.PlannerTurns)
 	fmt.Fprintf(&b, "  - Total tool calls      : %d\n", agg.TotalToolCalls)
 	fmt.Fprintf(&b, "  - PTC exec calls        : %d\n", agg.PTCCalls)
@@ -144,6 +149,9 @@ func AnalyzeFile(path string) (SessionReport, error) {
 		if strings.Contains(step.Content, "The output was large and was saved to:") {
 			rep.MCPSpillCount++
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return SessionReport{}, fmt.Errorf("reading %s: %w", path, err)
 	}
 	return rep, nil
 }
