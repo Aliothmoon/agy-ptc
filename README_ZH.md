@@ -272,6 +272,12 @@ AgyPTC/
 
 ---
 
+## 社区支持
+
+- [LINUX DO](https://linux.do)：交流使用经验、反馈问题与建议。
+
+---
+
 ## 致谢与开源协议
 
 - 设计灵感源自 [`fabric-runtime/pi-fabric`](https://github.com/fabric-runtime/pi-fabric) 与 [`INK-Q/agy-fast`](https://github.com/INK-Q/agy-fast)。

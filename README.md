@@ -273,6 +273,12 @@ AgyPTC/
 
 ---
 
+## Community Support
+
+- [LINUX DO](https://linux.do): Share usage experience, report issues, and suggest improvements.
+
+---
+
 ## Acknowledgments & License
 
 - Inspired by [`fabric-runtime/pi-fabric`](https://github.com/fabric-runtime/pi-fabric) and [`INK-Q/agy-fast`](https://github.com/INK-Q/agy-fast).
