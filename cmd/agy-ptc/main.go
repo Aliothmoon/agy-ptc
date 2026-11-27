@@ -264,9 +264,12 @@ func runLogs(args []string, forceErrors bool) {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		uiTail := 150
-		if tailSet && *tail > 0 {
-			uiTail = *tail
+		uiTail := 15
+		if wantErrors {
+			uiTail = 50
+		}
+		if tailSet {
+			uiTail = max(0, *tail)
 		}
 		src := tui.NewAuditLogSource(ctx, *dataDir, uiTail)
 		cfg := tui.Config{
